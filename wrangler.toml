@@ -32,7 +32,6 @@ main = 'packages/apps/workers-mk2/dist/index.js'   # Default use of dist/index.j
 # If you want to know how to obtain the ID of kv_namespaces, please check here.
 # https://github.com/TBXark/ChatGPT-Telegram-Workers/blob/master/doc/en/DEPLOY.md
 
-#kvm here
 
 [vars]
 # More parameters usage, please see https://github.com/TBXark/ChatGPT-Telegram-Workers/blob/master/doc/en/CONFIG.md
