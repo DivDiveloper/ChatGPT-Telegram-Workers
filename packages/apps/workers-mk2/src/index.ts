@@ -134,8 +134,8 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env): Promise<v
     // יצירת עותק מקומי לעבודה על הפנייה הנוכחית
     let activeMessages = [...messages];
 
-    // פנייה ראשונה ל-AI של Cloudflare
-    const aiResponse = await env.AI.run("@cf/meta/llama-3.1-8b-instruct", {
+    // פנייה ראשונה ל-AI של Cloudflare (שימוש במודל המהיר והמעודכן)
+    const aiResponse = await env.AI.run("@cf/meta/llama-3.1-8b-instruct-fast", {
       messages: activeMessages,
       tools
     });
@@ -222,7 +222,7 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env): Promise<v
         }
 
         // פנייה שנייה ל-AI לקבלת התשובה המבוססת על תוצאות החיפוש
-        const finalAiResponse = await env.AI.run("@cf/meta/llama-3.1-8b-instruct", {
+        const finalAiResponse = await env.AI.run("@cf/meta/llama-3.1-8b-instruct-fast", {
           messages: activeMessages
         });
 
