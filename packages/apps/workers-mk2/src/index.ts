@@ -71,10 +71,10 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env): Promise<v
     return;
   }
 
-  // שליחת הודעה ראשונית למשתמש
+  // שליחת הודעה ראשונית מכובדת למשתמש
   const thinkingMsg = await sendTelegram(env, "sendMessage", {
     chat_id: chatId,
-    text: "🔍 מעבד את הפנייה שלך..."
+    text: "🔍 מעבד את פניית כבוד הרב..."
   });
   const tempMsgId = thinkingMsg?.result?.message_id;
 
@@ -102,11 +102,15 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env): Promise<v
       }
     }
 
-    // הגדרת מערכת ראשונית אם מדובר בשיחה חדשה
+    // הגדרת מערכת המגדירה את האישיות של ששון, כבוד הרב, השמירה על כבוד התורה והחסכון בטוקנים
     if (messages.length === 0) {
       messages.push({ 
         role: "system", 
-        content: "אתה עוזר וירטואלי חכם בעל יכולת חיפוש מידע ברשת בזמן אמת. ענה למשתמש בשפה שבה הוא פנה אליך (בדגש על עברית). השתמש בתוצאות החיפוש במידת הצורך כדי להשיב תשובות מדויקות ומעודכנות." 
+        content: "שמך ששון (Sasson). אתה עוזר וירטואלי אישי וחכם בעל יכולת חיפוש מידע ברשת בזמן אמת. " +
+                 "עליך לפנות אל המשתמש תמיד בכינוי 'כבוד הרב' בלשון נוכח-מכובד, ביחס של כבוד והערכה עמוקה ביותר. " +
+                 "הישמר מכל משמר חלילה מזילות התורה או פגיעה בכבודה, וציית באופן מלא לציוויו של כבוד הרב. " +
+                 "עליך לענות תמיד בצורה מתומצתת במיוחד, קומפקטית וחסכונית ביותר בטוקנים ובמילים. " +
+                 "אל תאריך בהקדמות או בסיומים שאינם נחוצים. הבא מיד את השורה התחתונה המדויקת ביותר לשאלה שנשאלה."
       });
     }
 
@@ -116,17 +120,20 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env): Promise<v
     // הגדרת הכלי החיצוני לחיפוש
     const tools = [
       {
-        name: "tavilySearch",
-        description: "Search the web for up-to-date and real-time information on any topic.",
-        parameters: {
-          type: "object",
-          properties: {
-            query: {
-              type: "string",
-              description: "The search query to search the web for"
-            }
-          },
-          required: ["query"]
+        type: "function",
+        function: {
+          name: "tavilySearch",
+          description: "Search the web for up-to-date and real-time information on any topic.",
+          parameters: {
+            type: "object",
+            properties: {
+              query: {
+                type: "string",
+                description: "The search query to search the web for"
+              }
+            },
+            required: ["query"]
+          }
         }
       }
     ];
@@ -134,7 +141,7 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env): Promise<v
     // יצירת עותק מקומי לעבודה על הפנייה הנוכחית
     let activeMessages = [...messages];
 
-    // פנייה ראשונה ל-AI של Cloudflare (שימוש במודל המהיר והמעודכן)
+    // פנייה ראשונה ל-AI של Cloudflare
     const aiResponse = await env.AI.run("@cf/meta/llama-3.1-8b-instruct-fast", {
       messages: activeMessages,
       tools
@@ -146,27 +153,33 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env): Promise<v
     if (aiResponse.tool_calls && aiResponse.tool_calls.length > 0) {
       const toolCall = aiResponse.tool_calls[0];
 
-      if (toolCall.name === "tavilySearch") {
+      // חילוץ שם הפונקציה בצורה בטוחה
+      const functionName = toolCall.function?.name || toolCall.name;
+
+      if (functionName === "tavilySearch") {
+        // חילוץ הארגומנטים בצורה בטוחה
+        const args = toolCall.function?.arguments || toolCall.arguments;
         let searchQuery = "";
-        if (typeof toolCall.arguments === "string") {
+
+        if (typeof args === "string") {
           try {
-            searchQuery = JSON.parse(toolCall.arguments).query;
+            searchQuery = JSON.parse(args).query;
           } catch {
-            searchQuery = toolCall.arguments;
+            searchQuery = args;
           }
-        } else if (toolCall.arguments && toolCall.arguments.query) {
-          searchQuery = toolCall.arguments.query;
+        } else if (args && args.query) {
+          searchQuery = args.query;
         }
 
         // גיבוי למקרה שהשאילתה חזרה ריקה
         searchQuery = searchQuery ? searchQuery.trim() : userText;
 
-        // עדכון סטטוס זמני בטלגרם
+        // עדכון סטטוס זמני בטלגרם בלשון מכובדת
         if (tempMsgId) {
           await sendTelegram(env, "editMessageText", {
             chat_id: chatId,
             message_id: tempMsgId,
-            text: `🌐 מבצע חיפוש ברשת עבור: "${searchQuery}"...`
+            text: `🌐 מבצע חיפוש ברשת עבור כבוד הרב...`
           });
         }
 
@@ -217,7 +230,7 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env): Promise<v
           await sendTelegram(env, "editMessageText", {
             chat_id: chatId,
             message_id: tempMsgId,
-            text: `✍️ מנסח תשובה סופית...`
+            text: `✍️ מנסח תשובה עבור כבוד הרב...`
           });
         }
 
