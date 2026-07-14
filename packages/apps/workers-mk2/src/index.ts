@@ -1,6 +1,16 @@
-// הגדרת משתני הסביבה והבינדינגס של קלאודפלר
+// הגדרת ממשקים מקומיים למניעת תלות בטיפוסים הגלובליים של קלאודפלר
+interface CloudflareKV {
+  get(key: string): Promise<string | null>;
+  put(key: string, value: string, options?: { expirationTtl?: number }): Promise<void>;
+}
+
+interface CloudflareExecutionContext {
+  waitUntil(promise: Promise<any>): void;
+}
+
+// שימוש בממשקים המקומיים בהגדרת משתני הסביבה
 interface Env {
-  DATABASE: KVNamespace;
+  DATABASE: CloudflareKV;
   AI: any;
   TELEGRAM_BOT_TOKEN: string;
   TAVILY_API_KEY: string;
@@ -25,7 +35,7 @@ interface TavilyResult {
 }
 
 export default {
-  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+  async fetch(request: Request, env: Env, ctx: CloudflareExecutionContext): Promise<Response> {
     if (request.method !== "POST") {
       return new Response("Method Not Allowed", { status: 405 });
     }
