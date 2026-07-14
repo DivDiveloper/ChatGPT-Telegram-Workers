@@ -1,11 +1,37 @@
+// הגדרת משתני הסביבה והבינדינגס של קלאודפלר
+interface Env {
+  DATABASE: KVNamespace;
+  AI: any;
+  TELEGRAM_BOT_TOKEN: string;
+  TAVILY_API_KEY: string;
+}
+
+// הגדרת המבנה של עדכון מטלגרם
+interface TelegramUpdate {
+  message?: {
+    message_id: number;
+    chat: {
+      id: number;
+    };
+    text?: string;
+  };
+}
+
+// הגדרת תוצאות החיפוש של Tavily
+interface TavilyResult {
+  title: string;
+  url: string;
+  content: string;
+}
+
 export default {
-  async fetch(request, env, ctx) {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     if (request.method !== "POST") {
       return new Response("Method Not Allowed", { status: 405 });
     }
 
     try {
-      const update = await request.json();
+      const update = await request.json() as TelegramUpdate;
       
       // הרצת עיבוד ההודעה ברקע
       ctx.waitUntil(handleTelegramUpdate(update, env));
@@ -22,14 +48,14 @@ export default {
   }
 };
 
-async function handleTelegramUpdate(update, env) {
+async function handleTelegramUpdate(update: TelegramUpdate, env: Env): Promise<void> {
   const message = update.message;
   if (!message || !message.text) return;
 
   const chatId = message.chat.id.toString();
   const userText = message.text;
 
-  // 1. שלב בדיקת תקינות הגדרות (מניעת קריסות שקטות)
+  // בדיקת תקינות הגדרות בסיסיות
   if (!env.TELEGRAM_BOT_TOKEN) {
     console.error("Missing TELEGRAM_BOT_TOKEN variable");
     return;
@@ -53,9 +79,9 @@ async function handleTelegramUpdate(update, env) {
       throw new Error("TAVILY_API_KEY is missing in your environment variables");
     }
 
-    // 2. קריאת היסטוריית השיחה מה-KV (המקושר תחת השם DATABASE)
+    // קריאת היסטוריית השיחה מה-KV
     const rawHistory = await env.DATABASE.get(chatId);
-    let messages = [];
+    let messages: any[] = [];
 
     if (rawHistory) {
       try {
@@ -98,7 +124,7 @@ async function handleTelegramUpdate(update, env) {
     // יצירת עותק מקומי לעבודה על הפנייה הנוכחית
     let activeMessages = [...messages];
 
-    // 3. פנייה ראשונה ל-AI של Cloudflare
+    // פנייה ראשונה ל-AI של Cloudflare
     const aiResponse = await env.AI.run("@cf/meta/llama-3.1-8b-instruct", {
       messages: activeMessages,
       tools
@@ -106,7 +132,7 @@ async function handleTelegramUpdate(update, env) {
 
     let finalAnswer = "";
 
-    // 4. בדיקה האם המודל דורש לבצע חיפוש
+    // בדיקה האם המודל דורש לבצע חיפוש
     if (aiResponse.tool_calls && aiResponse.tool_calls.length > 0) {
       const toolCall = aiResponse.tool_calls[0];
 
@@ -122,7 +148,7 @@ async function handleTelegramUpdate(update, env) {
           searchQuery = toolCall.arguments.query;
         }
 
-        // גיבוי למקרה שהמודל החזיר שאילתה ריקה לכלי
+        // גיבוי למקרה שהשאילתה חזרה ריקה
         searchQuery = searchQuery ? searchQuery.trim() : userText;
 
         // עדכון סטטוס זמני בטלגרם
@@ -150,16 +176,17 @@ async function handleTelegramUpdate(update, env) {
           });
 
           if (tavilyRes.ok) {
-            const tavilyData = await tavilyRes.json();
+            const tavilyData = await tavilyRes.json() as { results?: TavilyResult[] };
             const results = tavilyData.results || [];
             searchResultsStr = results
-              .map(r => `Title: ${r.title}\nURL: ${r.url}\nContent: ${r.content}`)
+              .map((r: TavilyResult) => `Title: ${r.title}\nURL: ${r.url}\nContent: ${r.content}`)
               .join("\n\n");
           } else {
             searchResultsStr = `Tavily API returned status ${tavilyRes.status}`;
           }
         } catch (err) {
-          searchResultsStr = `Search failed: ${err.message}`;
+          const errMsg = err instanceof Error ? err.message : String(err);
+          searchResultsStr = `Search failed: ${errMsg}`;
         }
 
         // הזנת בחירת ה-AI ותוצאות החיפוש לעותק ההודעות הפעיל
@@ -196,12 +223,12 @@ async function handleTelegramUpdate(update, env) {
       finalAnswer = aiResponse.response || "לא הצלחתי לעבד את הפנייה.";
     }
 
-    // 5. מניעת שבירת מגבלת התווים של טלגרם (מקסימום 4096 תווים)
+    // מניעת שבירת מגבלת התווים של טלגרם (מקסימום 4096 תווים)
     if (finalAnswer.length > 4000) {
       finalAnswer = finalAnswer.substring(0, 4000) + "\n\n*(התשובה קוצרה עקב מגבלת תווים בטלגרם)*";
     }
 
-    // 6. שמירת התשובה הסופית בלבד בהיסטוריה המרכזית (ללא שלבי הביניים של ה-API)
+    // שמירת התשובה הסופית בלבד בהיסטוריה המרכזית (ללא שלבי הביניים של ה-API)
     messages.push({ role: "assistant", content: finalAnswer });
 
     // הגבלת אורך ההיסטוריה השמורה כדי למנוע חריגה ממגבלת המודל
@@ -209,24 +236,24 @@ async function handleTelegramUpdate(update, env) {
       messages = [messages[0], ...messages.slice(-10)];
     }
 
-    // שמירת ההיסטוריה המעודכנת ב-KV תחת הקישור DATABASE למשך שעתיים (7200 שניות)
+    // שמירת ההיסטוריה המעודכנת ב-KV למשך שעתיים (7200 שניות)
     await env.DATABASE.put(chatId, JSON.stringify(messages), { expirationTtl: 7200 });
 
-    // 7. עדכון הודעת הטלגרם עם התשובה הסופית
+    // עדכון הודעת הטלגרם עם התשובה הסופית
     if (tempMsgId) {
       await sendTelegramWithMarkdownFallback(env, chatId, tempMsgId, finalAnswer);
     }
 
   } catch (err) {
-    console.error("AI / DATABASE Error:", err);
+    const errMsg = err instanceof Error ? err.message : String(err);
+    console.error("AI / DATABASE Error:", errMsg);
     
-    // מניעת שגיאות לולאה זמניות בעת עדכון הודעת השגיאה בטלגרם
     if (tempMsgId) {
       try {
         await sendTelegram(env, "editMessageText", {
           chat_id: chatId,
           message_id: tempMsgId,
-          text: `⚠️ אירעה שגיאה במהלך עיבוד השיחה: ${err.message}`
+          text: `⚠️ אירעה שגיאה במהלך עיבוד השיחה: ${errMsg}`
         });
       } catch (teleErr) {
         console.error("Failed to notify user about error via Telegram:", teleErr);
@@ -235,7 +262,7 @@ async function handleTelegramUpdate(update, env) {
   }
 }
 
-async function sendTelegram(env, method, payload) {
+async function sendTelegram(env: Env, method: string, payload: any): Promise<any> {
   const url = `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/${method}`;
   const response = await fetch(url, {
     method: "POST",
@@ -245,7 +272,12 @@ async function sendTelegram(env, method, payload) {
   return response.json();
 }
 
-async function sendTelegramWithMarkdownFallback(env, chatId, messageId, text) {
+async function sendTelegramWithMarkdownFallback(
+  env: Env,
+  chatId: string,
+  messageId: number,
+  text: string
+): Promise<void> {
   const payloadMarkdown = {
     chat_id: chatId,
     message_id: messageId,
