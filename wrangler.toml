@@ -42,3 +42,13 @@ main = 'packages/apps/workers-mk2/dist/index.js'   # Default use of dist/index.j
 
 # TELEGRAM_AVAILABLE_TOKENS = 'token1,token2'
 # CHAT_WHITE_LIST = 'chat_id1,chat_id2'
+[ai]
+binding = "AI"
+
+[[kv_namespaces]]
+binding = "DATABASE"
+id = "המזהה_הייחודי_של_ה-KV_שלכם"
+
+[vars]
+TELEGRAM_BOT_TOKEN = "טוקן_הבוט_שלכם"
+TAVILY_API_KEY = "מפתח_ה-API_של_TAVILY"
