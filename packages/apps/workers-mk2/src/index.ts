@@ -212,16 +212,32 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env): Promise<v
           searchResultsStr = `Search failed: ${errMsg}`;
         }
 
-        // הזנת בחירת ה-AI ותוצאות החיפוש לעותק ההודעות הפעיל
+        // בניית מזהה ייחודי עבור ה-tool call ושרשור הארגומנטים כטקסט כפי שמצפה מערכת הוולידציה
+        const toolCallId = toolCall.id || `call_${Date.now()}`;
+        const argsString = typeof args === "string" ? args : JSON.stringify(args || {});
+
+        // בנייה מחדש של מערך ה-tool_calls בפורמט הסטנדרטי של OpenAI על מנת שיעבור וולידציה
+        const formattedToolCalls = [
+          {
+            id: toolCallId,
+            type: "function",
+            function: {
+              name: "tavilySearch",
+              arguments: argsString
+            }
+          }
+        ];
+
+        // הזנת בחירת ה-AI (בפורמט המלא) ותוצאות החיפוש לעותק ההודעות הפעיל
         activeMessages.push({
           role: "assistant",
           content: aiResponse.response || "",
-          tool_calls: aiResponse.tool_calls
+          tool_calls: formattedToolCalls
         });
 
         activeMessages.push({
           role: "tool",
-          tool_call_id: toolCall.id || "call_tavily",
+          tool_call_id: toolCallId, // חייב להיות זהה ל-id של ה-tool_call לעיל
           name: "tavilySearch",
           content: searchResultsStr || "לא נמצאו תוצאות חיפוש."
         });
