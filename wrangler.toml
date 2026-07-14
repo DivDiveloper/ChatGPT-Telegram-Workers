@@ -49,6 +49,5 @@ binding = "AI"
 binding = "DATABASE"
 id = "המזהה_הייחודי_של_ה-KV_שלכם"
 
-[vars]
 TELEGRAM_BOT_TOKEN = "טוקן_הבוט_שלכם"
 TAVILY_API_KEY = "מפתח_ה-API_של_TAVILY"
