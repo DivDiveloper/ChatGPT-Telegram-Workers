@@ -47,7 +47,5 @@ binding = "AI"
 
 [[kv_namespaces]]
 binding = "DATABASE"
-id = "המזהה_הייחודי_של_ה-KV_שלכם"
+id = "8f517f7c1c554db1b268d976683530d3"
 
-TELEGRAM_BOT_TOKEN = "טוקן_הבוט_שלכם"
-TAVILY_API_KEY = "מפתח_ה-API_של_TAVILY"
