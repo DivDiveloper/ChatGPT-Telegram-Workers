@@ -2,13 +2,13 @@
 interface CloudflareKV {
   get(key: string): Promise<string | null>;
   put(key: string, value: string, options?: { expirationTtl?: number }): Promise<void>;
+  delete(key: string): Promise<void>; // פונקציית מחיקה מה-database
 }
 
 interface CloudflareExecutionContext {
   waitUntil(promise: Promise<any>): void;
 }
 
-// שימוש בממשקים המקומיים בהגדרת משתני הסביבה
 interface Env {
   DATABASE: CloudflareKV;
   AI: any;
@@ -16,7 +16,6 @@ interface Env {
   TAVILY_API_KEY: string;
 }
 
-// הגדרת המבנה של עדכון מטלגרם
 interface TelegramUpdate {
   message?: {
     message_id: number;
@@ -27,7 +26,6 @@ interface TelegramUpdate {
   };
 }
 
-// הגדרת תוצאות החיפוש של Tavily
 interface TavilyResult {
   title: string;
   url: string;
@@ -46,7 +44,6 @@ export default {
       // הרצת עיבוד ההודעה ברקע
       ctx.waitUntil(handleTelegramUpdate(update, env));
       
-      // החזרת תשובה מיידית לטלגרם
       return new Response(JSON.stringify({ ok: true }), {
         status: 200,
         headers: { "Content-Type": "application/json" }
@@ -63,9 +60,8 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env): Promise<v
   if (!message || !message.text) return;
 
   const chatId = message.chat.id.toString();
-  const userText = message.text;
+  const userText = message.text.trim();
 
-  // בדיקת תקינות הגדרות בסיסיות
   if (!env.TELEGRAM_BOT_TOKEN) {
     console.error("Missing TELEGRAM_BOT_TOKEN variable");
     return;
@@ -79,14 +75,25 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env): Promise<v
   const tempMsgId = thinkingMsg?.result?.message_id;
 
   try {
-    // בדיקת הגדרת ה-KV (DATABASE)
     if (!env.DATABASE) {
-      throw new Error("DATABASE binding (KV) is missing. Please define a KV namespace bound as DATABASE in wrangler.toml");
+      throw new Error("DATABASE binding (KV) is missing.");
     }
 
-    // בדיקת הגדרת Tavily API Key
+    // טיפול בפקודת מחיקת היסטוריה
+    if (userText === "/clear" || userText === "/reset" || userText === "מחק היסטוריה") {
+      await env.DATABASE.delete(chatId);
+      if (tempMsgId) {
+        await sendTelegram(env, "editMessageText", {
+          chat_id: chatId,
+          message_id: tempMsgId,
+          text: "🗑️ היסטוריית השיחה נמחקה בהצלחה עבור כבוד הרב. ששון מוכן להתחיל מחדש."
+        });
+      }
+      return;
+    }
+
     if (!env.TAVILY_API_KEY) {
-      throw new Error("TAVILY_API_KEY is missing in your environment variables");
+      throw new Error("TAVILY_API_KEY is missing");
     }
 
     // קריאת היסטוריית השיחה מה-KV
@@ -97,24 +104,34 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env): Promise<v
       try {
         messages = JSON.parse(rawHistory);
       } catch (e) {
-        console.error("Error parsing chat history, starting fresh:", e);
+        console.error("Error parsing chat history:", e);
         messages = [];
       }
     }
 
-    // הגדרת מערכת המגדירה את האישיות של ששון, כבוד הרב, השמירה על כבוד התורה והחסכון בטוקנים
+    // הגדרת מערכת והזרקת תאריך דינמי בעברית (לפי שעון ירושלים)
     if (messages.length === 0) {
+      const today = new Date();
+      const formattedDate = today.toLocaleDateString("he-IL", { 
+        year: "numeric", 
+        month: "long", 
+        day: "numeric", 
+        weekday: "long",
+        timeZone: "Asia/Jerusalem" 
+      });
+
       messages.push({ 
         role: "system", 
-        content: "שמך ששון (Sasson). אתה עוזר וירטואלי אישי וחכם בעל יכולת חיפוש מידע ברשת בזמן אמת. " +
-                 "עליך לפנות אל המשתמש תמיד בכינוי 'כבוד הרב' בלשון נוכח-מכובד, ביחס של כבוד והערכה עמוקה ביותר. " +
-                 "הישמר מכל משמר חלילה מזילות התורה או פגיעה בכבודה, וציית באופן מלא לציוויו של כבוד הרב. " +
-                 "עליך לענות תמיד בצורה מתומצתת במיוחד, קומפקטית וחסכונית ביותר בטוקנים ובמילים. " +
-                 "אל תאריך בהקדמות או בסיומים שאינם נחוצים. הבא מיד את השורה התחתונה המדויקת ביותר לשאלה שנשאלה."
+        content: `שמך ששון (Sasson). אתה עוזר וירטואלי אישי וחכם בעל יכולת חיפוש מידע ברשת בזמן אמת. ` +
+                 `התאריך של היום הוא: ${formattedDate}. ` +
+                 `עליך לפנות אל המשתמש תמיד בכינוי 'כבוד הרב' בלשון נוכח-מכובד, ביחס של כבוד והערכה עמוקה ביותר. ` +
+                 `הישמר מכל משמר חלילה מזילות התורה או פגיעה בכבודה, וציית באופן מלא לציוויו של כבוד הרב. ` +
+                 `עליך לענות תמיד בצורה מתומצתת במיוחד, קומפקטית וחסכונית ביותר בטוקנים ובמילים. ` +
+                 `אל תאריך בהקדמות או בסיומים שאינם נחוצים. הבא מיד את השורה התחתונה המדויקת ביותר לשאלה שנשאלה. ` +
+                 `כל שאילתות החיפוש שאתה מייצר עבור הכלי (tavilySearch) חייבות להיכתב בשפה האנגלית בלבד (לדוגמה: "who is the prime minister of israel") אלא אם כן כבוד הרב ביקש ממך במפורש לחפש בשפה אחרת. החיפוש באנגלית יניב תוצאות טובות יותר, אך את התשובה לכבוד הרב תנסח תמיד בעברית רהוטה ומכובדת.`
       });
     }
 
-    // הוספת הודעת המשתמש הנוכחית להיסטוריית השיחה
     messages.push({ role: "user", content: userText });
 
     // הגדרת הכלי החיצוני לחיפוש
@@ -138,26 +155,21 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env): Promise<v
       }
     ];
 
-    // יצירת עותק מקומי לעבודה על הפנייה הנוכחית
     let activeMessages = [...messages];
 
-    // פנייה ראשונה ל-AI של Cloudflare
-    const aiResponse = await env.AI.run("@cf/meta/llama-3.1-8b-instruct-fast", {
+    // פנייה ראשונה ל-AI (שימוש במודל Llama 3.3 70B Fast)
+    const aiResponse = await env.AI.run("@cf/meta/llama-3.3-70b-instruct-fp8-fast", {
       messages: activeMessages,
       tools
     });
 
     let finalAnswer = "";
 
-    // בדיקה האם המודל דורש לבצע חיפוש
     if (aiResponse.tool_calls && aiResponse.tool_calls.length > 0) {
       const toolCall = aiResponse.tool_calls[0];
-
-      // חילוץ שם הפונקציה בצורה בטוחה
       const functionName = toolCall.function?.name || toolCall.name;
 
       if (functionName === "tavilySearch") {
-        // חילוץ הארגומנטים בצורה בטוחה
         const args = toolCall.function?.arguments || toolCall.arguments;
         let searchQuery = "";
 
@@ -171,10 +183,8 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env): Promise<v
           searchQuery = args.query;
         }
 
-        // גיבוי למקרה שהשאילתה חזרה ריקה
         searchQuery = searchQuery ? searchQuery.trim() : userText;
 
-        // עדכון סטטוס זמני בטלגרם בלשון מכובדת
         if (tempMsgId) {
           await sendTelegram(env, "editMessageText", {
             chat_id: chatId,
@@ -212,11 +222,9 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env): Promise<v
           searchResultsStr = `Search failed: ${errMsg}`;
         }
 
-        // בניית מזהה ייחודי עבור ה-tool call ושרשור הארגומנטים כטקסט כפי שמצפה מערכת הוולידציה
         const toolCallId = toolCall.id || `call_${Date.now()}`;
         const argsString = typeof args === "string" ? args : JSON.stringify(args || {});
 
-        // בנייה מחדש של מערך ה-tool_calls בפורמט הסטנדרטי של OpenAI על מנת שיעבור וולידציה
         const formattedToolCalls = [
           {
             id: toolCallId,
@@ -228,7 +236,6 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env): Promise<v
           }
         ];
 
-        // הזנת בחירת ה-AI (בפורמט המלא) ותוצאות החיפוש לעותק ההודעות הפעיל
         activeMessages.push({
           role: "assistant",
           content: aiResponse.response || "",
@@ -237,7 +244,7 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env): Promise<v
 
         activeMessages.push({
           role: "tool",
-          tool_call_id: toolCallId, // חייב להיות זהה ל-id של ה-tool_call לעיל
+          tool_call_id: toolCallId,
           name: "tavilySearch",
           content: searchResultsStr || "לא נמצאו תוצאות חיפוש."
         });
@@ -250,37 +257,46 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env): Promise<v
           });
         }
 
-        // פנייה שנייה ל-AI לקבלת התשובה המבוססת על תוצאות החיפוש
-        const finalAiResponse = await env.AI.run("@cf/meta/llama-3.1-8b-instruct-fast", {
+        const finalAiResponse = await env.AI.run("@cf/meta/llama-3.3-70b-instruct-fp8-fast", {
           messages: activeMessages
         });
 
         finalAnswer = finalAiResponse.response || "לא התקבלה תשובה סופית.";
       }
     } else {
-      // תשובה ישירה ללא צורך בחיפוש
       finalAnswer = aiResponse.response || "לא הצלחתי לעבד את הפנייה.";
     }
 
-    // מניעת שבירת מגבלת התווים של טלגרם (מקסימום 4096 תווים)
-    if (finalAnswer.length > 4000) {
-      finalAnswer = finalAnswer.substring(0, 4000) + "\n\n*(התשובה קוצרה עקב מגבלת תווים בטלגרם)*";
-    }
-
-    // שמירת התשובה הסופית בלבד בהיסטוריה המרכזית (ללא שלבי הביניים של ה-API)
+    // שמירת התשובה הסופית המלאה ב-database לצורך היסטוריית השיחה
     messages.push({ role: "assistant", content: finalAnswer });
 
-    // הגבלת אורך ההיסטוריה השמורה כדי למנוע חריגה ממגבלת המודל
     if (messages.length > 11) {
       messages = [messages[0], ...messages.slice(-10)];
     }
 
-    // שמירת ההיסטוריה המעודכנת ב-KV למשך שעתיים (7200 שניות)
     await env.DATABASE.put(chatId, JSON.stringify(messages), { expirationTtl: 7200 });
 
-    // עדכון הודעת הטלגרם עם התשובה הסופית
+    // 3. שידור מדורג של התשובה למניעת קפיצות בחלון הצ'אט
     if (tempMsgId) {
-      await sendTelegramWithMarkdownFallback(env, chatId, tempMsgId, finalAnswer);
+      const chunks = chunkText(finalAnswer);
+      
+      if (chunks.length > 0) {
+        // עדכון ההודעה הזמנית הראשונה עם הפסקה הראשונה
+        await sendTelegramWithMarkdownFallback(env, chatId, tempMsgId, chunks[0]);
+        
+        // שליחת שאר הפסקאות כהודעות עוקבות חדשות עם דיליי קל המדמה הקלדה
+        for (let i = 1; i < chunks.length; i++) {
+          await sendTelegram(env, "sendChatAction", {
+            chat_id: chatId,
+            action: "typing"
+          });
+          
+          // השהייה קלה של 800 מילישניות כדי להעניק חווית קריאה נוחה
+          await new Promise(resolve => setTimeout(resolve, 800));
+          
+          await sendNewTelegramWithMarkdownFallback(env, chatId, chunks[i]);
+        }
+      }
     }
 
   } catch (err) {
@@ -299,6 +315,38 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env): Promise<v
       }
     }
   }
+}
+
+// פונקציה חכמה לחלוקת טקסט ארוך לפסקאות נוחות לקריאה (עד 600 תווים לפסקה)
+function chunkText(text: string): string[] {
+  const paragraphs = text.split(/\n\n+/).filter(p => p.trim().length > 0);
+  const chunks: string[] = [];
+  let currentChunk = "";
+
+  for (const para of paragraphs) {
+    if (currentChunk.length + para.length + 2 > 600) {
+      if (currentChunk) {
+        chunks.push(currentChunk.trim());
+        currentChunk = "";
+      }
+      if (para.length > 600) {
+        let temp = para;
+        while (temp.length > 600) {
+          chunks.push(temp.substring(0, 600));
+          temp = temp.substring(600);
+        }
+        currentChunk = temp;
+      } else {
+        currentChunk = para;
+      }
+    } else {
+      currentChunk = currentChunk ? currentChunk + "\n\n" + para : para;
+    }
+  }
+  if (currentChunk) {
+    chunks.push(currentChunk.trim());
+  }
+  return chunks;
 }
 
 async function sendTelegram(env: Env, method: string, payload: any): Promise<any> {
@@ -326,11 +374,32 @@ async function sendTelegramWithMarkdownFallback(
 
   const res = await sendTelegram(env, "editMessageText", payloadMarkdown);
   if (!res.ok) {
-    // שליחה חוזרת ללא parse_mode במידה ועיצוב ה-Markdown של ה-AI אינו תקין עבור טלגרם
     await sendTelegram(env, "editMessageText", {
       chat_id: chatId,
       message_id: messageId,
       text: text
     });
   }
+}
+
+async function sendNewTelegramWithMarkdownFallback(
+  env: Env,
+  chatId: string,
+  text: string
+): Promise<any> {
+  const payloadMarkdown = {
+    chat_id: chatId,
+    text: text,
+    parse_mode: "Markdown"
+  };
+
+  let res = await sendTelegram(env, "sendMessage", payloadMarkdown);
+  if (!res.ok) {
+    // שליחה ללא parse_mode במידה והעיצוב נכשל
+    res = await sendTelegram(env, "sendMessage", {
+      chat_id: chatId,
+      text: text
+    });
+  }
+  return res;
 }
