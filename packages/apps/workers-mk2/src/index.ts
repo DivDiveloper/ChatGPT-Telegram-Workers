@@ -9,12 +9,15 @@ interface CloudflareExecutionContext {
   waitUntil(promise: Promise<any>): void;
 }
 
+// הגדרת משתני הסביבה כולל חיבור השירות (Service Binding) של ה-TTS
 interface Env {
   DATABASE: CloudflareKV;
   AI: any;
   TELEGRAM_BOT_TOKEN: string;
   TAVILY_API_KEY: string;
-  TTS_WORKER_URL?: string; // הקישור לוורקר ה-TTS השני שלך
+  TTS_SERVICE?: {
+    fetch(request: Request): Promise<Response>;
+  }; // חיבור פנימי ישיר במקום משתנה URL חיצוני
 }
 
 interface TelegramUpdate {
@@ -42,7 +45,7 @@ export default {
     try {
       const update = await request.json() as TelegramUpdate;
       
-      // הרצת עיבוד ההודעה ברקע - העברת ctx כפרמטר שלישי
+      // הרצת עיבוד ההודעה ברקע - העברת ה-ctx כפרמטר
       ctx.waitUntil(handleTelegramUpdate(update, env, ctx));
       
       return new Response(JSON.stringify({ ok: true }), {
@@ -50,39 +53,59 @@ export default {
         headers: { "Content-Type": "application/json" }
       });
     } catch (err) {
-      console.error("Error receiving webhook:", err);
+      console.error("Error receiving webhook request:", err);
       return new Response("OK", { status: 200 });
     }
   }
 };
 
-// הגדרת הפונקציה המקבלת את ctx כפרמטר שלישי
 async function handleTelegramUpdate(update: TelegramUpdate, env: Env, ctx: CloudflareExecutionContext): Promise<void> {
-  const message = update.message;
-  if (!message || !message.text) return;
+  console.log("1. Received Telegram update payload:", JSON.stringify(update));
 
-  const chatId = message.chat.id.toString();
-  const userText = message.text.trim();
-
-  if (!env.TELEGRAM_BOT_TOKEN) {
-    console.error("Missing TELEGRAM_BOT_TOKEN variable");
-    return;
-  }
-
-  // שליחת הודעה ראשונית מכובדת למשתמש
-  const thinkingMsg = await sendTelegram(env, "sendMessage", {
-    chat_id: chatId,
-    text: "🔍 מעבד את פניית כבוד הרב..."
-  });
-  const tempMsgId = thinkingMsg?.result?.message_id;
+  let tempMsgId: number | undefined = undefined;
+  let chatId = "";
 
   try {
+    const message = update.message;
+    if (!message) {
+      console.log("Aborting: Update does not contain a message object.");
+      return;
+    }
+    if (!message.text) {
+      console.log("Aborting: Message object does not contain text.");
+      return;
+    }
+
+    chatId = message.chat.id.toString();
+    const userText = message.text.trim();
+    console.log(`2. Processing text: "${userText}" for Chat ID: ${chatId}`);
+
+    // בדיקת תקינות הגדרות בסיסיות
+    if (!env.TELEGRAM_BOT_TOKEN) {
+      throw new Error("Missing TELEGRAM_BOT_TOKEN environment variable");
+    }
+
+    // שליחת הודעה ראשונית מכובדת למשתמש
+    console.log("3. Sending initial 'thinking' message to Telegram...");
+    const thinkingMsg = await sendTelegram(env, "sendMessage", {
+      chat_id: chatId,
+      text: "🔍 מעבד את פניית כבוד הרב..."
+    });
+
+    if (!thinkingMsg || !thinkingMsg.ok) {
+      throw new Error(`Failed to send initial message. Telegram API error: ${thinkingMsg?.description || "Unknown error"}`);
+    }
+
+    tempMsgId = thinkingMsg.result?.message_id;
+    console.log("4. Initial message sent successfully. Message ID:", tempMsgId);
+
     if (!env.DATABASE) {
-      throw new Error("DATABASE binding (KV) is missing.");
+      throw new Error("DATABASE binding (KV namespace) is missing.");
     }
 
     // טיפול בפקודת מחיקת היסטוריה
     if (userText === "/clear" || userText === "/reset" || userText === "מחק היסטוריה") {
+      console.log(`Command received: deleting history for chat ${chatId}`);
       await env.DATABASE.delete(chatId);
       if (tempMsgId) {
         await sendTelegram(env, "editMessageText", {
@@ -95,16 +118,18 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env, ctx: Cloud
     }
 
     if (!env.TAVILY_API_KEY) {
-      throw new Error("TAVILY_API_KEY is missing");
+      throw new Error("TAVILY_API_KEY is missing in environment variables");
     }
 
     // קריאת היסטוריית השיחה מה-KV
+    console.log("5. Reading chat history from KV...");
     const rawHistory = await env.DATABASE.get(chatId);
     let messages: any[] = [];
 
     if (rawHistory) {
       try {
         messages = JSON.parse(rawHistory);
+        console.log(`Loaded ${messages.length} messages from history.`);
       } catch (e) {
         console.error("Error parsing chat history, starting fresh:", e);
         messages = [];
@@ -157,16 +182,20 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env, ctx: Cloud
     let activeMessages = [...messages];
 
     // פנייה ראשונה ל-AI (Llama 3.3 70B Fast)
+    console.log("6. Calling Workers AI (Llama 3.3 70B Fast) - Turn 1...");
     const aiResponse = await env.AI.run("@cf/meta/llama-3.3-70b-instruct-fp8-fast", {
       messages: activeMessages,
       tools
     });
+
+    console.log("AI First response output:", JSON.stringify(aiResponse));
 
     let finalAnswer = "";
 
     if (aiResponse.tool_calls && aiResponse.tool_calls.length > 0) {
       const toolCall = aiResponse.tool_calls[0];
       const functionName = toolCall.function?.name || toolCall.name;
+      console.log("AI requested tool call:", functionName);
 
       if (functionName === "tavilySearch") {
         const args = toolCall.function?.arguments || toolCall.arguments;
@@ -183,6 +212,7 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env, ctx: Cloud
         }
 
         searchQuery = searchQuery ? searchQuery.trim() : userText;
+        console.log("7. Final search query extracted:", searchQuery);
 
         if (tempMsgId) {
           await sendTelegram(env, "editMessageText", {
@@ -193,6 +223,7 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env, ctx: Cloud
         }
 
         // ביצוע החיפוש ב-Tavily
+        console.log("8. Performing Tavily Search API call...");
         let searchResultsStr = "";
         try {
           const tavilyRes = await fetch("https://api.tavily.com/search", {
@@ -208,18 +239,22 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env, ctx: Cloud
             signal: AbortSignal.timeout(5000) // הגנת קטיעת זמן בעומס
           });
 
+          console.log("Tavily response status:", tavilyRes.status);
+
           if (tavilyRes.ok) {
             const tavilyData = await tavilyRes.json() as { results?: TavilyResult[] };
             const results = tavilyData.results || [];
             searchResultsStr = results
               .map((r: TavilyResult) => `Title: ${r.title}\nURL: ${r.url}\nContent: ${r.content}`)
               .join("\n\n");
+            console.log(`Tavily returned ${results.length} search results.`);
           } else {
             searchResultsStr = `Tavily API returned status ${tavilyRes.status}`;
           }
         } catch (err) {
           const errMsg = err instanceof Error ? err.message : String(err);
           searchResultsStr = `Search failed: ${errMsg}`;
+          console.error("Tavily Search call failed:", errMsg);
         }
 
         const toolCallId = toolCall.id || `call_${Date.now()}`;
@@ -257,6 +292,7 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env, ctx: Cloud
           });
         }
 
+        console.log("9. Calling Workers AI (Llama 3.3 70B Fast) - Turn 2 (Final Answer)...");
         const finalAiResponse = await env.AI.run("@cf/meta/llama-3.3-70b-instruct-fp8-fast", {
           messages: activeMessages
         });
@@ -264,8 +300,11 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env, ctx: Cloud
         finalAnswer = finalAiResponse.response || "לא התקבלה תשובה סופית.";
       }
     } else {
+      console.log("AI responded directly, no tool call needed.");
       finalAnswer = aiResponse.response || "לא הצלחתי לעבד את הפנייה.";
     }
+
+    console.log("10. Final Answer calculated:", finalAnswer);
 
     // שמירת התשובה המלאה לצורך היסטוריית השיחה
     messages.push({ role: "assistant", content: finalAnswer });
@@ -275,31 +314,35 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env, ctx: Cloud
     }
 
     await env.DATABASE.put(chatId, JSON.stringify(messages), { expirationTtl: 7200 });
+    console.log("11. Conversation history updated in KV database.");
 
-    // -------------------------------------------------------------
-    // אינטגרציה מובנית ואסינכרונית עם וורקר ה-TTS (Walkie-Talkie)
-    // -------------------------------------------------------------
-    if (env.TTS_WORKER_URL) {
+    // ---------------------------------------------------------------------
+    // אינטגרציה מובנית ואסינכרונית עם וורקר ה-TTS דרך SERVICE BINDING
+    // ---------------------------------------------------------------------
+    if (env.TTS_SERVICE) {
+      console.log("12. Triggering TTS Worker via Service Binding...");
       ctx.waitUntil((async () => {
         try {
-          await fetch(env.TTS_WORKER_URL as string, {
+          const ttsRes = await env.TTS_SERVICE.fetch(new Request("http://ttss.local/", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
               chatId: chatId,
               text: finalAnswer
-            }),
-            signal: AbortSignal.timeout(5000) // הגנת קטיעת זמן בעומס
-          });
+            })
+          }));
+          console.log("TTS Worker Service Binding response status:", ttsRes.status);
         } catch (ttsErr) {
-          console.error("Failed to trigger TTS Worker under load:", ttsErr);
+          console.error("Failed to trigger TTS Worker via Service Binding:", ttsErr);
         }
       })());
     }
 
     // 3. שידור מדורג של התשובה בטלגרם למניעת קפיצות
     if (tempMsgId) {
+      console.log("13. Splitting answer and streaming chunks to Telegram...");
       const chunks = chunkText(finalAnswer);
+      console.log(`Answer divided into ${chunks.length} chunks.`);
       
       if (chunks.length > 0) {
         await sendTelegramWithMarkdownFallback(env, chatId, tempMsgId, chunks[0]);
@@ -315,12 +358,13 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env, ctx: Cloud
         }
       }
     }
+    console.log("14. Conversation flow completed successfully.");
 
   } catch (err) {
     const errMsg = err instanceof Error ? err.message : String(err);
-    console.error("AI / DATABASE Error:", errMsg);
+    console.error("CRITICAL AI / DATABASE Error:", errMsg);
     
-    if (tempMsgId) {
+    if (tempMsgId && chatId) {
       try {
         await sendTelegram(env, "editMessageText", {
           chat_id: chatId,
