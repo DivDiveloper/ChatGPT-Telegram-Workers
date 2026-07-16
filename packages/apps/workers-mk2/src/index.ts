@@ -271,9 +271,10 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env, ctx: Cloud
           }
         ];
 
+        // תיקון קריטי: שדה content חייב להיות מוגדר כ-null מפורש בהודעת ה-assistant המפעילה כלי
         activeMessages.push({
           role: "assistant",
-          content: aiResponse.response || "",
+          content: aiResponse.response || null,
           tool_calls: formattedToolCalls
         });
 
@@ -319,7 +320,7 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env, ctx: Cloud
     // ---------------------------------------------------------------------
     // אינטגרציה מובנית ואסינכרונית עם וורקר ה-TTS דרך SERVICE BINDING
     // ---------------------------------------------------------------------
-    const ttsService = env.TTS_SERVICE; // מניעת שגיאת closure אסינכרונית באמצעות משתנה קבוע
+    const ttsService = env.TTS_SERVICE; // שימוש במשתנה מקומי קבוע לפתרון ה-strict null checks ב-closures
     if (ttsService) {
       console.log("12. Triggering TTS Worker via Service Binding...");
       ctx.waitUntil((async () => {
@@ -367,4 +368,99 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env, ctx: Cloud
     
     if (tempMsgId && chatId) {
       try {
-        await sendTelegram(env,
+        await sendTelegram(env, "editMessageText", {
+          chat_id: chatId,
+          message_id: tempMsgId,
+          text: `⚠️ אירעה שגיאה במהלך עיבוד השיחה: ${errMsg}`
+        });
+      } catch (teleErr) {
+        console.error("Failed to notify user about error via Telegram:", teleErr);
+      }
+    }
+  }
+}
+
+function chunkText(text: string): string[] {
+  const paragraphs = text.split(/\n\n+/).filter(p => p.trim().length > 0);
+  const chunks: string[] = [];
+  let currentChunk = "";
+
+  for (const para of paragraphs) {
+    if (currentChunk.length + para.length + 2 > 600) {
+      if (currentChunk) {
+        chunks.push(currentChunk.trim());
+        currentChunk = "";
+      }
+      if (para.length > 600) {
+        let temp = para;
+        while (temp.length > 600) {
+          chunks.push(temp.substring(0, 600));
+          temp = temp.substring(600);
+        }
+        currentChunk = temp;
+      } else {
+        currentChunk = para;
+      }
+    } else {
+      currentChunk = currentChunk ? currentChunk + "\n\n" + para : para;
+    }
+  }
+  if (currentChunk) {
+    chunks.push(currentChunk.trim());
+  }
+  return chunks;
+}
+
+async function sendTelegram(env: Env, method: string, payload: any): Promise<any> {
+  const url = `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/${method}`;
+  const response = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload)
+  });
+  return response.json();
+}
+
+async function sendTelegramWithMarkdownFallback(
+  env: Env,
+  chatId: string,
+  messageId: number,
+  text: string
+): Promise<void> {
+  const payloadMarkdown = {
+    chat_id: chatId,
+    message_id: messageId,
+    text: text,
+    parse_mode: "Markdown"
+  };
+
+  const res = await sendTelegram(env, "editMessageText", payloadMarkdown);
+  if (!res.ok) {
+    await sendTelegram(env, "editMessageText", {
+      chat_id: chatId,
+      message_id: messageId,
+      text: text
+    });
+  }
+}
+
+async function sendNewTelegramWithMarkdownFallback(
+  env: Env,
+  chatId: string,
+  text: string
+): Promise<any> {
+  const payloadMarkdown = {
+    chat_id: chatId,
+    text: text,
+    parse_mode: "Markdown"
+  };
+
+  let res = await sendTelegram(env, "sendMessage", payloadMarkdown);
+  if (!res.ok) {
+    res = await sendTelegram(env, "sendMessage", {
+      chat_id: chatId,
+      text: text
+    });
+  }
+  return res;
+}
