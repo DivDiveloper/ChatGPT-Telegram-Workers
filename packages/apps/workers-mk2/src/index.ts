@@ -1,4 +1,4 @@
-// הגדרת ממשקים מקומיים למניעת תלות בטיפוסים הגלובליים של קלאודפלר
+// הגדרת ממשקים מקומיים למניעת תלות בטיפוסים הגלובלים של קלאודפלר
 interface CloudflareKV {
   get(key: string): Promise<string | null>;
   put(key: string, value: string, options?: { expirationTtl?: number }): Promise<void>;
