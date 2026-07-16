@@ -1,4 +1,4 @@
-// הגדרת ממשקים מקומיים למניעת תלות בטיפוסים הגלובלים של קלאודפלר
+// הגדרת ממשקים מקומיים למניעת תלות בטיפוסים הגלובליים של קלאודפלר
 interface CloudflareKV {
   get(key: string): Promise<string | null>;
   put(key: string, value: string, options?: { expirationTtl?: number }): Promise<void>;
@@ -319,11 +319,12 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env, ctx: Cloud
     // ---------------------------------------------------------------------
     // אינטגרציה מובנית ואסינכרונית עם וורקר ה-TTS דרך SERVICE BINDING
     // ---------------------------------------------------------------------
-    if (env.TTS_SERVICE) {
+    const ttsService = env.TTS_SERVICE; // שימוש במשתנה מקומי קבוע לפתרון ה-strict null checks ב-closures
+    if (ttsService) {
       console.log("12. Triggering TTS Worker via Service Binding...");
       ctx.waitUntil((async () => {
         try {
-          const ttsRes = await env.TTS_SERVICE.fetch(new Request("http://ttss.local/", {
+          const ttsRes = await ttsService.fetch(new Request("http://ttss.local/", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
