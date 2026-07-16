@@ -325,6 +325,7 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env, ctx: Cloud
       console.log("12. Triggering TTS Worker via Service Binding...");
       ctx.waitUntil((async () => {
         try {
+          // תיקון סופי: שימוש ב-ttsService המקומי במקום ב-env.TTS_SERVICE האופציונלי
           const ttsRes = await ttsService.fetch(new Request("http://ttss.local/", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
