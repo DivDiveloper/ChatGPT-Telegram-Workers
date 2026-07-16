@@ -42,7 +42,7 @@ main = 'packages/apps/workers-mk2/dist/index.js'   # Default use of dist/index.j
 
 # TELEGRAM_AVAILABLE_TOKENS = 'token1,token2'
 # CHAT_WHITE_LIST = 'chat_id1,chat_id2'
-# TTS_WORKER_URL = 'https://ttss.d2023david.workers.dev'
+
 [ai]
 binding = "AI"
 
@@ -50,3 +50,6 @@ binding = "AI"
 binding = "DATABASE"
 id = "8f517f7c1c554db1b268d976683530d3"
 
+[[services]]
+binding = "TTS_SERVICE"
+service = "ttss" 
