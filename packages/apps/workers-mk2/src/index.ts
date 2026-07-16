@@ -271,10 +271,10 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env, ctx: Cloud
           }
         ];
 
-        // תיקון קריטי: שדה content חייב להיות מוגדר כ-null מפורש בהודעת ה-assistant המפעילה כלי
+        // שחזור למחרוזת ריקה: מפענח קלאודפלר מחייב ששדה content יהיה מסוג string (למשל "") ולא null
         activeMessages.push({
           role: "assistant",
-          content: aiResponse.response || null,
+          content: aiResponse.response || "",
           tool_calls: formattedToolCalls
         });
 
@@ -325,7 +325,6 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env, ctx: Cloud
       console.log("12. Triggering TTS Worker via Service Binding...");
       ctx.waitUntil((async () => {
         try {
-          // תיקון סופי: שימוש ב-ttsService המקומי במקום ב-env.TTS_SERVICE האופציונלי
           const ttsRes = await ttsService.fetch(new Request("http://ttss.local/", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
