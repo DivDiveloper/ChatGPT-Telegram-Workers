@@ -2,7 +2,7 @@
 interface CloudflareKV {
   get(key: string): Promise<string | null>;
   put(key: string, value: string, options?: { expirationTtl?: number }): Promise<void>;
-  delete(key: string): Promise<void>; // פונקציית מחיקה מה-database
+  delete(key: string): Promise<void>;
 }
 
 interface CloudflareExecutionContext {
@@ -14,6 +14,7 @@ interface Env {
   AI: any;
   TELEGRAM_BOT_TOKEN: string;
   TAVILY_API_KEY: string;
+  TTS_WORKER_URL?: string; // הקישור לוורקר ה-TTS השני שלך
 }
 
 interface TelegramUpdate {
@@ -41,8 +42,8 @@ export default {
     try {
       const update = await request.json() as TelegramUpdate;
       
-      // הרצת עיבוד ההודעה ברקע
-      ctx.waitUntil(handleTelegramUpdate(update, env));
+      // הרצת עיבוד ההודעה ברקע - העברת ctx כפרמטר שלישי
+      ctx.waitUntil(handleTelegramUpdate(update, env, ctx));
       
       return new Response(JSON.stringify({ ok: true }), {
         status: 200,
@@ -55,7 +56,8 @@ export default {
   }
 };
 
-async function handleTelegramUpdate(update: TelegramUpdate, env: Env): Promise<void> {
+// הגדרת הפונקציה המקבלת את ctx כפרמטר שלישי
+async function handleTelegramUpdate(update: TelegramUpdate, env: Env, ctx: CloudflareExecutionContext): Promise<void> {
   const message = update.message;
   if (!message || !message.text) return;
 
@@ -104,12 +106,12 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env): Promise<v
       try {
         messages = JSON.parse(rawHistory);
       } catch (e) {
-        console.error("Error parsing chat history:", e);
+        console.error("Error parsing chat history, starting fresh:", e);
         messages = [];
       }
     }
 
-    // הגדרת מערכת והזרקת תאריך דינמי בעברית (לפי שעון ירושלים)
+    // הגדרת מערכת ממוקדת ומקוצרת עם הזרקת תאריך דינמי בעברית
     if (messages.length === 0) {
       const today = new Date();
       const formattedDate = today.toLocaleDateString("he-IL", { 
@@ -122,19 +124,16 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env): Promise<v
 
       messages.push({ 
         role: "system", 
-        content: `שמך ששון (Sasson). אתה עוזר וירטואלי אישי וחכם בעל יכולת חיפוש מידע ברשת בזמן אמת. ` +
-                 `התאריך של היום הוא: ${formattedDate}. ` +
-                 `עליך לפנות אל המשתמש תמיד בכינוי 'כבוד הרב' בלשון נוכח-מכובד, ביחס של כבוד והערכה עמוקה ביותר. ` +
-                 `הישמר מכל משמר חלילה מזילות התורה או פגיעה בכבודה, וציית באופן מלא לציוויו של כבוד הרב. ` +
-                 `עליך לענות תמיד בצורה מתומצתת במיוחד, קומפקטית וחסכונית ביותר בטוקנים ובמילים. ` +
-                 `אל תאריך בהקדמות או בסיומים שאינם נחוצים. הבא מיד את השורה התחתונה המדויקת ביותר לשאלה שנשאלה. ` +
-                 `כל שאילתות החיפוש שאתה מייצר עבור הכלי (tavilySearch) חייבות להיכתב בשפה האנגלית בלבד (לדוגמה: "who is the prime minister of israel") אלא אם כן כבוד הרב ביקש ממך במפורש לחפש בשפה אחרת. החיפוש באנגלית יניב תוצאות טובות יותר, אך את התשובה לכבוד הרב תנסח תמיד בעברית רהוטה ומכובדת.`
+        content: `שמך ששון (Sasson). אתה עוזר וירטואלי אישי לכבוד הרב, בעל יכולת חיפוש מידע ברשת. ` +
+                 `התאריך היום: ${formattedDate}. ` +
+                 `עליך לפנות למשתמש תמיד בכינוי 'כבוד הרב' בלשון נוכח-מכובד, ביראת כבוד עמוקה, לשמור על כבוד התורה ולציית לציוויו. ` +
+                 `ענה בעברית רהוטה, עניינית ומקיפה במעט (בסביבות 200-300 מילים במידת הצורך, הימנע מהארכות סרק ומסיכומים מיותרים). ` +
+                 `שאילתות החיפוש עבור הכלי (tavilySearch) חייבות להיכתב באנגלית בלבד (לדוגמה: "israel news today") אלא אם התבקשת אחרת במפורש. נסח את התשובה הסופית בעברית.`
       });
     }
 
     messages.push({ role: "user", content: userText });
 
-    // הגדרת הכלי החיצוני לחיפוש
     const tools = [
       {
         type: "function",
@@ -157,7 +156,7 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env): Promise<v
 
     let activeMessages = [...messages];
 
-    // פנייה ראשונה ל-AI (שימוש במודל Llama 3.3 70B Fast)
+    // פנייה ראשונה ל-AI (Llama 3.3 70B Fast)
     const aiResponse = await env.AI.run("@cf/meta/llama-3.3-70b-instruct-fp8-fast", {
       messages: activeMessages,
       tools
@@ -205,7 +204,8 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env): Promise<v
             body: JSON.stringify({
               query: searchQuery,
               max_results: 5
-            })
+            }),
+            signal: AbortSignal.timeout(5000) // הגנת קטיעת זמן בעומס
           });
 
           if (tavilyRes.ok) {
@@ -267,7 +267,7 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env): Promise<v
       finalAnswer = aiResponse.response || "לא הצלחתי לעבד את הפנייה.";
     }
 
-    // שמירת התשובה הסופית המלאה ב-database לצורך היסטוריית השיחה
+    // שמירת התשובה המלאה לצורך היסטוריית השיחה
     messages.push({ role: "assistant", content: finalAnswer });
 
     if (messages.length > 11) {
@@ -276,24 +276,41 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env): Promise<v
 
     await env.DATABASE.put(chatId, JSON.stringify(messages), { expirationTtl: 7200 });
 
-    // 3. שידור מדורג של התשובה למניעת קפיצות בחלון הצ'אט
+    // -------------------------------------------------------------
+    // אינטגרציה מובנית ואסינכרונית עם וורקר ה-TTS (Walkie-Talkie)
+    // -------------------------------------------------------------
+    if (env.TTS_WORKER_URL) {
+      ctx.waitUntil((async () => {
+        try {
+          await fetch(env.TTS_WORKER_URL as string, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              chatId: chatId,
+              text: finalAnswer
+            }),
+            signal: AbortSignal.timeout(5000) // הגנת קטיעת זמן בעומס
+          });
+        } catch (ttsErr) {
+          console.error("Failed to trigger TTS Worker under load:", ttsErr);
+        }
+      })());
+    }
+
+    // 3. שידור מדורג של התשובה בטלגרם למניעת קפיצות
     if (tempMsgId) {
       const chunks = chunkText(finalAnswer);
       
       if (chunks.length > 0) {
-        // עדכון ההודעה הזמנית הראשונה עם הפסקה הראשונה
         await sendTelegramWithMarkdownFallback(env, chatId, tempMsgId, chunks[0]);
         
-        // שליחת שאר הפסקאות כהודעות עוקבות חדשות עם דיליי קל המדמה הקלדה
         for (let i = 1; i < chunks.length; i++) {
           await sendTelegram(env, "sendChatAction", {
             chat_id: chatId,
             action: "typing"
           });
           
-          // השהייה קלה של 800 מילישניות כדי להעניק חווית קריאה נוחה
           await new Promise(resolve => setTimeout(resolve, 800));
-          
           await sendNewTelegramWithMarkdownFallback(env, chatId, chunks[i]);
         }
       }
@@ -317,7 +334,6 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env): Promise<v
   }
 }
 
-// פונקציה חכמה לחלוקת טקסט ארוך לפסקאות נוחות לקריאה (עד 600 תווים לפסקה)
 function chunkText(text: string): string[] {
   const paragraphs = text.split(/\n\n+/).filter(p => p.trim().length > 0);
   const chunks: string[] = [];
@@ -395,7 +411,6 @@ async function sendNewTelegramWithMarkdownFallback(
 
   let res = await sendTelegram(env, "sendMessage", payloadMarkdown);
   if (!res.ok) {
-    // שליחה ללא parse_mode במידה והעיצוב נכשל
     res = await sendTelegram(env, "sendMessage", {
       chat_id: chatId,
       text: text
