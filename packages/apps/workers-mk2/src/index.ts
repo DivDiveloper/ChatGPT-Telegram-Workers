@@ -270,6 +270,7 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env, ctx: Cloud
         console.log("8. Performing Tavily Search API call...");
         let searchResultsStr = "";
         try {
+          // הגדלת קטיעת הזמן ל-15 שניות המבטיחה מענה יציב גם בעומס רשת
           const tavilyRes = await fetch("https://api.tavily.com/search", {
             method: "POST",
             headers: {
@@ -280,7 +281,7 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env, ctx: Cloud
               query: searchQuery,
               max_results: 5
             }),
-            signal: AbortSignal.timeout(5000)
+            signal: AbortSignal.timeout(15000) 
           });
 
           console.log("Tavily response status:", tavilyRes.status);
@@ -293,12 +294,14 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env, ctx: Cloud
               .join("\n\n");
             console.log(`Tavily returned ${results.length} search results.`);
           } else {
-            searchResultsStr = `Tavily API returned status ${tavilyRes.status}`;
+            throw new Error(`Tavily returned status ${tavilyRes.status}`);
           }
         } catch (err) {
           const errMsg = err instanceof Error ? err.message : String(err);
-          searchResultsStr = `Search failed: ${errMsg}`;
-          console.error("Tavily Search call failed:", errMsg);
+          console.error("Tavily Search call failed or timed out:", errMsg);
+          
+          // מנגנון התאוששות שקט (Graceful Degradation): במקום לקרוס, נבקש מה-AI להשתמש בידע הפנימי שלו [2]
+          searchResultsStr = "שגיאת חיפוש: החיפוש ברשת נכשל או לקח זמן רב מדי עקב עומס זמני. אנא השב לכבוד הרב על בסיס הידע הקיים שלך בלבד ללא תוצאות חיפוש חיות.";
         }
 
         const toolCallId = toolCall.id || `call_${Date.now()}`;
@@ -322,12 +325,12 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env, ctx: Cloud
           tool_calls: formattedToolCalls
         });
 
-        // מזינים את תוצאות החיפוש שחזרו מ-Tavily
+        // מזינים את תוצאות החיפוש (או את הודעת ההתאוששות השקטה במידה ונכשל) [2]
         activeMessages.push({
           role: "tool",
           tool_call_id: toolCallId,
           name: "tavilySearch",
-          content: searchResultsStr || "לא נמצאו תוצאות חיפוש."
+          content: searchResultsStr
         });
 
         if (tempMsgId) {
@@ -378,7 +381,6 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env, ctx: Cloud
     // ---------------------------------------------------------------------
     // אינטגרציה מובנית ואסינכרונית עם וורקר ה-TTS דרך SERVICE BINDING
     // ---------------------------------------------------------------------
-    // בדיקה מקדימה ב-KV האם כבוד הרב כיבה את שירות ההודעות הקוליות [1]
     const voiceDisabled = await env.DATABASE.get(`voice_disabled:${chatId}`);
     const ttsService = env.TTS_SERVICE; 
 
@@ -486,7 +488,7 @@ async function callNvidiaFallback(messages: any[], env: Env, tools?: any[]): Pro
       "Authorization": `Bearer ${env.NVIDIA_API_KEY}`
     },
     body: JSON.stringify(bodyPayload),
-    signal: AbortSignal.timeout(10000)
+    signal: AbortSignal.timeout(20000) // הגדלת זמן ההמתנה מול נבידיה ל-20 שניות בעומס רשת [2]
   });
 
   if (!response.ok) {
@@ -543,7 +545,8 @@ async function sendTelegram(env: Env, method: string, payload: any): Promise<any
   const response = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload)
+    body: JSON.stringify(payload),
+    signal: AbortSignal.timeout(15000) // הגנת קטיעת זמן של 15 שניות לקריאות מול טלגרם כדי למנוע תקיעות
   });
   return response.json();
 }
