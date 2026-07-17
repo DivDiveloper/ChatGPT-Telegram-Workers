@@ -9,7 +9,7 @@ interface CloudflareExecutionContext {
   waitUntil(promise: Promise<any>): void;
 }
 
-// הגדרת משתני הסביבה כולל חיבור השירות (Service Binding) של ה-TTS
+// הגדרת משתני הסביבה כולל חיבור השירות של ה-TTS ומפתח נבידיה
 interface Env {
   DATABASE: CloudflareKV;
   AI: any;
@@ -17,7 +17,8 @@ interface Env {
   TAVILY_API_KEY: string;
   TTS_SERVICE?: {
     fetch(request: Request): Promise<Response>;
-  }; // חיבור פנימי ישיר במקום משתנה URL חיצוני
+  }; // חיבור פנימי ישיר לוורקר ה-TTS
+  NVIDIA_API_KEY?: string; // מפתח ה-API של NVIDIA שיוגדר כסיקרט מוצפן
 }
 
 interface TelegramUpdate {
@@ -103,7 +104,7 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env, ctx: Cloud
       throw new Error("DATABASE binding (KV namespace) is missing.");
     }
 
-    // טיפול בפקודת מחיקת היסטוריה
+    // א. טיפול בפקודת מחיקת היסטוריה
     if (userText === "/clear" || userText === "/reset" || userText === "מחק היסטוריה") {
       console.log(`Command received: deleting history for chat ${chatId}`);
       await env.DATABASE.delete(chatId);
@@ -112,6 +113,34 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env, ctx: Cloud
           chat_id: chatId,
           message_id: tempMsgId,
           text: "🗑️ היסטוריית השיחה נמחקה בהצלחה עבור כבוד הרב. ששון מוכן להתחיל מחדש."
+        });
+      }
+      return;
+    }
+
+    // ב. טיפול בפקודת כיבוי השירות הקולי (/voff)
+    if (userText === "/voff") {
+      console.log(`Command received: disabling voice for chat ${chatId}`);
+      await env.DATABASE.put(`voice_disabled:${chatId}`, "true");
+      if (tempMsgId) {
+        await sendTelegram(env, "editMessageText", {
+          chat_id: chatId,
+          message_id: tempMsgId,
+          text: "🔇 שירות ההודעות הקוליות כובה עבור כבוד הרב. מעתה ששון ישיב בכתב בלבד."
+        });
+      }
+      return;
+    }
+
+    // ג. טיפול בפקודת הפעלת השירות הקולי מחדש (/von)
+    if (userText === "/von") {
+      console.log(`Command received: enabling voice for chat ${chatId}`);
+      await env.DATABASE.delete(`voice_disabled:${chatId}`);
+      if (tempMsgId) {
+        await sendTelegram(env, "editMessageText", {
+          chat_id: chatId,
+          message_id: tempMsgId,
+          text: "🔊 שירות ההודעות הקוליות הופעל עבור כבוד הרב. מעתה ששון ישלח גם הודעה קולית."
         });
       }
       return;
@@ -180,18 +209,33 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env, ctx: Cloud
     ];
 
     let activeMessages = [...messages];
+    let aiResponse: any = null;
 
-    // פנייה ראשונה ל-AI (Llama 3.3 70B Fast)
+    // פנייה ראשונה ל-AI (עם הגנת חריגת מכסה ומעבר אוטומטי לנבידיה 120B תומך כלים)
     console.log("6. Calling Workers AI (Llama 3.3 70B Fast) - Turn 1...");
-    const aiResponse = await env.AI.run("@cf/meta/llama-3.3-70b-instruct-fp8-fast", {
-      messages: activeMessages,
-      tools
-    });
+    try {
+      aiResponse = await env.AI.run("@cf/meta/llama-3.3-70b-instruct-fp8-fast", {
+        messages: activeMessages,
+        tools
+      });
+    } catch (err) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      console.warn("Workers AI Turn 1 failed:", errMsg);
+      
+      // בדיקה האם מדובר בשגיאת חריגת מכסה יומית (4006) או שגיאת רשת כללית של ה-AI
+      if (errMsg.includes("4006") || errMsg.includes("allocation") || errMsg.includes("neurons") || errMsg.includes("free")) {
+        console.log("🚨 Daily free neurons limit reached. Activating NVIDIA 120B fallback WITH tools for Turn 1...");
+        aiResponse = await callNvidiaFallback(activeMessages, env, tools);
+      } else {
+        throw err;
+      }
+    }
 
     console.log("AI First response output:", JSON.stringify(aiResponse));
 
     let finalAnswer = "";
 
+    // בדיקה האם המודל הנוכחי החזיר דרישה להפעלת כלי
     if (aiResponse.tool_calls && aiResponse.tool_calls.length > 0) {
       const toolCall = aiResponse.tool_calls[0];
       const functionName = toolCall.function?.name || toolCall.name;
@@ -236,7 +280,7 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env, ctx: Cloud
               query: searchQuery,
               max_results: 5
             }),
-            signal: AbortSignal.timeout(5000) // הגנת קטיעת זמן בעומס
+            signal: AbortSignal.timeout(5000)
           });
 
           console.log("Tavily response status:", tavilyRes.status);
@@ -271,13 +315,14 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env, ctx: Cloud
           }
         ];
 
-        // שחזור למחרוזת ריקה: מפענח קלאודפלר מחייב ששדה content יהיה מסוג string (למשל "") ולא null
+        // מזינים את בחירת ה-AI
         activeMessages.push({
           role: "assistant",
           content: aiResponse.response || "",
           tool_calls: formattedToolCalls
         });
 
+        // מזינים את תוצאות החיפוש שחזרו מ-Tavily
         activeMessages.push({
           role: "tool",
           tool_call_id: toolCallId,
@@ -294,9 +339,22 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env, ctx: Cloud
         }
 
         console.log("9. Calling Workers AI (Llama 3.3 70B Fast) - Turn 2 (Final Answer)...");
-        const finalAiResponse = await env.AI.run("@cf/meta/llama-3.3-70b-instruct-fp8-fast", {
-          messages: activeMessages
-        });
+        let finalAiResponse: any = null;
+        try {
+          finalAiResponse = await env.AI.run("@cf/meta/llama-3.3-70b-instruct-fp8-fast", {
+            messages: activeMessages
+          });
+        } catch (err) {
+          const errMsg = err instanceof Error ? err.message : String(err);
+          console.warn("Workers AI Turn 2 failed:", errMsg);
+
+          if (errMsg.includes("4006") || errMsg.includes("allocation") || errMsg.includes("neurons") || errMsg.includes("free")) {
+            console.log("🚨 Daily free neurons limit reached. Activating NVIDIA 120B fallback for Turn 2...");
+            finalAiResponse = await callNvidiaFallback(activeMessages, env);
+          } else {
+            throw err;
+          }
+        }
 
         finalAnswer = finalAiResponse.response || "לא התקבלה תשובה סופית.";
       }
@@ -320,8 +378,11 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env, ctx: Cloud
     // ---------------------------------------------------------------------
     // אינטגרציה מובנית ואסינכרונית עם וורקר ה-TTS דרך SERVICE BINDING
     // ---------------------------------------------------------------------
-    const ttsService = env.TTS_SERVICE; // שימוש במשתנה מקומי קבוע לפתרון ה-strict null checks ב-closures
-    if (ttsService) {
+    // בדיקה מקדימה ב-KV האם כבוד הרב כיבה את שירות ההודעות הקוליות [1]
+    const voiceDisabled = await env.DATABASE.get(`voice_disabled:${chatId}`);
+    const ttsService = env.TTS_SERVICE; 
+
+    if (ttsService && voiceDisabled !== "true") {
       console.log("12. Triggering TTS Worker via Service Binding...");
       ctx.waitUntil((async () => {
         try {
@@ -338,6 +399,8 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env, ctx: Cloud
           console.error("Failed to trigger TTS Worker via Service Binding:", ttsErr);
         }
       })());
+    } else {
+      console.log("12. TTS Worker call skipped (either disabled by user or service binding missing).");
     }
 
     // 3. שידור מדורג של התשובה בטלגרם למניעת קפיצות
@@ -378,6 +441,70 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env, ctx: Cloud
       }
     }
   }
+}
+
+// פונקציית הגיבוי המורחבת לקריאה ישירה ל-NVIDIA NIM API מול המודל הענק Nemotron 3 Super 120B
+async function callNvidiaFallback(messages: any[], env: Env, tools?: any[]): Promise<any> {
+  if (!env.NVIDIA_API_KEY) {
+    throw new Error("NVIDIA_API_KEY is missing in your environment variables. Cannot execute fallback.");
+  }
+
+  const nvidiaUrl = "https://integrate.api.nvidia.com/v1/chat/completions";
+
+  // נרמול ומיפוי היסטוריית השיחה בצורה מלאה התואמת ל-OpenAI (כולל תמיכה ב-tool_calls היסטוריים ובשדות id)
+  const formattedMessages = messages.map(m => {
+    const msg: any = {
+      role: m.role,
+      content: m.content
+    };
+    if (m.tool_calls) msg.tool_calls = m.tool_calls;
+    if (m.tool_call_id) msg.tool_call_id = m.tool_call_id;
+    if (m.name) msg.name = m.name;
+    return msg;
+  });
+
+  // בניית גוף הבקשה לנבידיה
+  const bodyPayload: any = {
+    model: "nvidia/nemotron-3-super-120b-a12b",
+    messages: formattedMessages,
+    temperature: 1,
+    top_p: 0.95,
+    max_tokens: 1024
+  };
+
+  // במידה והועברו כלים (בסבב הראשון), נצרף אותם לבקשה של נבידיה
+  if (tools) {
+    bodyPayload.tools = tools;
+  }
+
+  console.log("Sending direct payload to NVIDIA NIM API...");
+
+  const response = await fetch(nvidiaUrl, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Authorization": `Bearer ${env.NVIDIA_API_KEY}`
+    },
+    body: JSON.stringify(bodyPayload),
+    signal: AbortSignal.timeout(10000)
+  });
+
+  if (!response.ok) {
+    const errText = await response.text();
+    throw new Error(`NVIDIA API returned status ${response.status}. Details: ${errText}`);
+  }
+
+  const resJson = await response.json() as any;
+  const choice = resJson?.choices?.[0];
+  const textAnswer = choice?.message?.content || "";
+  const toolCalls = choice?.message?.tool_calls;
+
+  console.log("NVIDIA 120B responded successfully!");
+
+  return {
+    response: textAnswer,
+    tool_calls: toolCalls
+  };
 }
 
 function chunkText(text: string): string[] {
