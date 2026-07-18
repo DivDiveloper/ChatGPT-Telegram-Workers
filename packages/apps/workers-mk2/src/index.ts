@@ -165,7 +165,7 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env, ctx: Cloud
       }
     }
 
-    // הגדרת מערכת ממוקדת ומקוצרת עם הזרקת תאריך דינמי בעברית
+    // הגדרת מערכת ממוקדת, קומפקטית וחסכונית במילים עם הזרקת תאריך דינמי
     if (messages.length === 0) {
       const today = new Date();
       const formattedDate = today.toLocaleDateString("he-IL", { 
@@ -181,7 +181,7 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env, ctx: Cloud
         content: `שמך ששון (Sasson). אתה עוזר וירטואלי אישי לכבוד הרב, בעל יכולת חיפוש מידע ברשת. ` +
                  `התאריך היום: ${formattedDate}. ` +
                  `עליך לפנות למשתמש תמיד בכינוי 'כבוד הרב' בלשון נוכח-מכובד, ביראת כבוד עמוקה, לשמור על כבוד התורה ולציית לציוויו. ` +
-                 `ענה בעברית רהוטה, עניינית ומקיפה במעט (בסביבות 200-300 מילים במידת הצורך, הימנע מהארכות סרק ומסיכומים מיותרים). ` +
+                 `ענה בעברית רהוטה, ממוקדת, קומפקטית וחסכונית במילים (בסביבות 100-150 מילים לכל היותר, ללא הקדמות או סיכומים מיותרים). ` +
                  `שאילתות החיפוש עבור הכלי (tavilySearch) חייבות להיכתב באנגלית בלבד (לדוגמה: "israel news today") אלא אם התבקשת אחרת במפורש. נסח את התשובה הסופית בעברית.`
       });
     }
@@ -211,12 +211,13 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env, ctx: Cloud
     let activeMessages = [...messages];
     let aiResponse: any = null;
 
-    // פנייה ראשונה ל-AI (עם הגנת חריגת מכסה ומעבר אוטומטי לנבידיה 120B תומך כלים) [1, 2]
+    // פנייה ראשונה ל-AI (הגדרת max_tokens: 512 לתגובות קצרות וחסכוניות) [1]
     console.log("6. Calling Workers AI (Llama 3.3 70B Fast) - Turn 1...");
     try {
       aiResponse = await env.AI.run("@cf/meta/llama-3.3-70b-instruct-fp8-fast", {
         messages: activeMessages,
-        tools
+        tools,
+        max_tokens: 512 // מכסה בטוחה וחסכונית ל-Turn 1 [1]
       });
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);
@@ -318,7 +319,7 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env, ctx: Cloud
           }
         ];
 
-        // מזינים את בחירת ה-AI (שימוש במחרוזת ריקה ולא null כדי לעבור בהצלחה וולידציית קלאודפלר)
+        // מזינים את בחירת ה-AI
         activeMessages.push({
           role: "assistant",
           content: aiResponse.response || "",
@@ -345,7 +346,8 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env, ctx: Cloud
         let finalAiResponse: any = null;
         try {
           finalAiResponse = await env.AI.run("@cf/meta/llama-3.3-70b-instruct-fp8-fast", {
-            messages: activeMessages
+            messages: activeMessages,
+            max_tokens: 512 // מכסה בטוחה וחסכונית ל-Turn 2 [1]
           });
         } catch (err) {
           const errMsg = err instanceof Error ? err.message : String(err);
@@ -381,7 +383,6 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env, ctx: Cloud
     // ---------------------------------------------------------------------
     // אינטגרציה מובנית ואסינכרונית עם וורקר ה-TTS דרך SERVICE BINDING
     // ---------------------------------------------------------------------
-    // בדיקה מקדימה ב-KV האם כבוד הרב כיבה את שירות ההודעות הקוליות [1]
     const voiceDisabled = await env.DATABASE.get(`voice_disabled:${chatId}`);
     const ttsService = env.TTS_SERVICE; 
 
@@ -466,13 +467,13 @@ async function callNvidiaFallback(messages: any[], env: Env, tools?: any[]): Pro
     return msg;
   });
 
-  // בניית גוף הבקשה לנבידיה
+  // בניית גוף הבקשה לנבידיה (עם הגבלת max_tokens: 512 לתגובות קצרות וחסכוניות) [1]
   const bodyPayload: any = {
     model: "nvidia/nemotron-3-super-120b-a12b",
     messages: formattedMessages,
     temperature: 1,
     top_p: 0.95,
-    max_tokens: 1024
+    max_tokens: 512 // שימוש במכסה של 512 לתגובות ממוקדות [1]
   };
 
   // במידה והועברו כלים (בסבב הראשון), נצרף אותם לבקשה של נבידיה
