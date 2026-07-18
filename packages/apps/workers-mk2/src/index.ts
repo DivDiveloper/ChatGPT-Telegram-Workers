@@ -211,7 +211,7 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env, ctx: Cloud
     let activeMessages = [...messages];
     let aiResponse: any = null;
 
-    // פנייה ראשונה ל-AI (עם הגנת חריגת מכסה ומעבר אוטומטי לנבידיה 120B תומך כלים)
+    // פנייה ראשונה ל-AI (עם הגנת חריגת מכסה ומעבר אוטומטי לנבידיה 120B תומך כלים) [1, 2]
     console.log("6. Calling Workers AI (Llama 3.3 70B Fast) - Turn 1...");
     try {
       aiResponse = await env.AI.run("@cf/meta/llama-3.3-70b-instruct-fp8-fast", {
@@ -300,7 +300,7 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env, ctx: Cloud
           const errMsg = err instanceof Error ? err.message : String(err);
           console.error("Tavily Search call failed or timed out:", errMsg);
           
-          // מנגנון התאוששות שקט (Graceful Degradation): במקום לקרוס, נבקש מה-AI להשתמש בידע הפנימי שלו [2]
+          // מנגנון התאוששות שקט (Graceful Degradation): במקום לקרוס, נבקש מה-AI להשתמש בידע הפנימי שלו
           searchResultsStr = "שגיאת חיפוש: החיפוש ברשת נכשל או לקח זמן רב מדי עקב עומס זמני. אנא השב לכבוד הרב על בסיס הידע הקיים שלך בלבד ללא תוצאות חיפוש חיות.";
         }
 
@@ -318,14 +318,14 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env, ctx: Cloud
           }
         ];
 
-        // מזינים את בחירת ה-AI
+        // מזינים את בחירת ה-AI (שימוש במחרוזת ריקה ולא null כדי לעבור בהצלחה וולידציית קלאודפלר)
         activeMessages.push({
           role: "assistant",
           content: aiResponse.response || "",
           tool_calls: formattedToolCalls
         });
 
-        // מזינים את תוצאות החיפוש (או את הודעת ההתאוששות השקטה במידה ונכשל) [2]
+        // מזינים את תוצאות החיפוש
         activeMessages.push({
           role: "tool",
           tool_call_id: toolCallId,
@@ -381,6 +381,7 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env, ctx: Cloud
     // ---------------------------------------------------------------------
     // אינטגרציה מובנית ואסינכרונית עם וורקר ה-TTS דרך SERVICE BINDING
     // ---------------------------------------------------------------------
+    // בדיקה מקדימה ב-KV האם כבוד הרב כיבה את שירות ההודעות הקוליות [1]
     const voiceDisabled = await env.DATABASE.get(`voice_disabled:${chatId}`);
     const ttsService = env.TTS_SERVICE; 
 
@@ -445,7 +446,7 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env, ctx: Cloud
   }
 }
 
-// פונקציית הגיבוי המורחבת לקריאה ישירה ל-NVIDIA NIM API מול המודל הענק Nemotron 3 Super 120B
+// פונקציית הגיבוי המורחבת לקריאה ישירה ל-NVIDIA NIM API מול המודל הענק Nemotron 3 Super 120B [1.2.7]
 async function callNvidiaFallback(messages: any[], env: Env, tools?: any[]): Promise<any> {
   if (!env.NVIDIA_API_KEY) {
     throw new Error("NVIDIA_API_KEY is missing in your environment variables. Cannot execute fallback.");
@@ -488,7 +489,7 @@ async function callNvidiaFallback(messages: any[], env: Env, tools?: any[]): Pro
       "Authorization": `Bearer ${env.NVIDIA_API_KEY}`
     },
     body: JSON.stringify(bodyPayload),
-    signal: AbortSignal.timeout(20000) // הגדלת זמן ההמתנה מול נבידיה ל-20 שניות בעומס רשת [2]
+    signal: AbortSignal.timeout(20000) // הגנת קטיעת זמן של 20 שניות בעומס רשת
   });
 
   if (!response.ok) {
