@@ -9,7 +9,7 @@ interface CloudflareExecutionContext {
   waitUntil(promise: Promise<any>): void;
 }
 
-// הגדרת משתני הסביבה כולל חיבור השירות של ה-TTS ומפתח נבידיה
+// הגדרת משתני הסביבה כולל החיבורים הפנימיים לשני הוורקרים (TTS ו-STT)
 interface Env {
   DATABASE: CloudflareKV;
   AI: any;
@@ -17,7 +17,10 @@ interface Env {
   TAVILY_API_KEY: string;
   TTS_SERVICE?: {
     fetch(request: Request): Promise<Response>;
-  }; // חיבור פנימי ישיר לוורקר ה-TTS
+  }; // חיבור פנימי לוורקר ה-TTS (ttss)
+  STT_SERVICE?: {
+    fetch(request: Request): Promise<Response>;
+  }; // חיבור פנימי חדש לוורקר ה-STT (sstt)
   NVIDIA_API_KEY?: string; // מפתח ה-API של NVIDIA שיוגדר כסיקרט מוצפן
 }
 
@@ -28,6 +31,9 @@ interface TelegramUpdate {
       id: number;
     };
     text?: string;
+    voice?: {
+      file_id: string;
+    }; // זיהוי הודעה קולית מטלגרם
   };
 }
 
@@ -72,14 +78,15 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env, ctx: Cloud
       console.log("Aborting: Update does not contain a message object.");
       return;
     }
-    if (!message.text) {
-      console.log("Aborting: Message object does not contain text.");
+    
+    // בדיקה האם ההודעה מכילה טקסט או הודעה קולית (עבור STT)
+    if (!message.text && !message.voice) {
+      console.log("Aborting: Message contains neither text nor voice.");
       return;
     }
 
     chatId = message.chat.id.toString();
-    const userText = message.text.trim();
-    console.log(`2. Processing text: "${userText}" for Chat ID: ${chatId}`);
+    let userText = "";
 
     // בדיקת תקינות הגדרות בסיסיות
     if (!env.TELEGRAM_BOT_TOKEN) {
@@ -104,46 +111,161 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env, ctx: Cloud
       throw new Error("DATABASE binding (KV namespace) is missing.");
     }
 
-    // א. טיפול בפקודת מחיקת היסטוריה
-    if (userText === "/clear" || userText === "/reset" || userText === "מחק היסטוריה") {
-      console.log(`Command received: deleting history for chat ${chatId}`);
-      await env.DATABASE.delete(chatId);
-      if (tempMsgId) {
-        await sendTelegram(env, "editMessageText", {
-          chat_id: chatId,
-          message_id: tempMsgId,
-          text: "🗑️ היסטוריית השיחה נמחקה בהצלחה עבור כבוד הרב. ששון מוכן להתחיל מחדש."
-        });
-      }
-      return;
-    }
+    // א. טיפול בפקודות טקסט ישירות (אם יש טקסט)
+    if (message.text) {
+      userText = message.text.trim();
 
-    // ב. טיפול בפקודת כיבוי השירות הקולי (/voff)
-    if (userText === "/voff") {
-      console.log(`Command received: disabling voice for chat ${chatId}`);
-      await env.DATABASE.put(`voice_disabled:${chatId}`, "true");
-      if (tempMsgId) {
-        await sendTelegram(env, "editMessageText", {
-          chat_id: chatId,
-          message_id: tempMsgId,
-          text: "🔇 שירות ההודעות הקוליות כובה עבור כבוד הרב. מעתה ששון ישיב בכתב בלבד."
-        });
+      // פקודת מחיקת היסטוריה
+      if (userText === "/clear" || userText === "/reset" || userText === "מחק היסטוריה") {
+        console.log(`Command received: deleting history for chat ${chatId}`);
+        await env.DATABASE.delete(chatId);
+        if (tempMsgId) {
+          await sendTelegram(env, "editMessageText", {
+            chat_id: chatId,
+            message_id: tempMsgId,
+            text: "🗑️ היסטוריית השיחה נמחקה בהצלחה עבור כבוד הרב. ששון מוכן להתחיל מחדש."
+          });
+        }
+        return;
       }
-      return;
-    }
 
-    // ג. טיפול בפקודת הפעלת השירות הקולי מחדש (/von)
-    if (userText === "/von") {
-      console.log(`Command received: enabling voice for chat ${chatId}`);
-      await env.DATABASE.delete(`voice_disabled:${chatId}`);
+      // פקודת כיבוי השירות הקולי (/voff) - פלט קול מהבוט
+      if (userText === "/voff") {
+        console.log(`Command received: disabling voice output for chat ${chatId}`);
+        await env.DATABASE.put(`voice_disabled:${chatId}`, "true");
+        if (tempMsgId) {
+          await sendTelegram(env, "editMessageText", {
+            chat_id: chatId,
+            message_id: tempMsgId,
+            text: "🔇 שירות ההודעות הקוליות (TTS) כובה עבור כבוד הרב. מעתה ששון ישיב בכתב בלבד."
+          });
+        }
+        return;
+      }
+
+      // פקודת הפעלת השירות הקולי מחדש (/von) - פלט קול מהבוט
+      if (userText === "/von") {
+        console.log(`Command received: enabling voice output for chat ${chatId}`);
+        await env.DATABASE.delete(`voice_disabled:${chatId}`);
+        if (tempMsgId) {
+          await sendTelegram(env, "editMessageText", {
+            chat_id: chatId,
+            message_id: tempMsgId,
+            text: "🔊 שירות ההודעות הקוליות (TTS) הופעל עבור כבוד הרב. מעתה ששון ישלח גם הודעה קולית."
+          });
+        }
+        return;
+      }
+
+      // פקודת כיבוי זיהוי הודעות קוליות מהמשתמש (/soff) - קלט קול לבוט
+      if (userText === "/soff") {
+        console.log(`Command received: disabling voice input for chat ${chatId}`);
+        await env.DATABASE.put(`stt_disabled:${chatId}`, "true");
+        if (tempMsgId) {
+          await sendTelegram(env, "editMessageText", {
+            chat_id: chatId,
+            message_id: tempMsgId,
+            text: "🔇 שירות הזיהוי הקולי (STT) כובה עבור כבוד הרב. מעתה ששון יקבל הודעות טקסט בלבד."
+          });
+        }
+        return;
+      }
+
+      // פקודת הפעלת זיהוי הודעות קוליות מהמשתמש מחדש (/son) - קלט קול לבוט
+      if (userText === "/son") {
+        console.log(`Command received: enabling voice input for chat ${chatId}`);
+        await env.DATABASE.delete(`stt_disabled:${chatId}`);
+        if (tempMsgId) {
+          await sendTelegram(env, "editMessageText", {
+            chat_id: chatId,
+            message_id: tempMsgId,
+            text: "🔊 שירות הזיהוי הקולי (STT) הופעל עבור כבוד הרב. מעתה ששון יפענח גם הודעות קוליות."
+          });
+        }
+        return;
+      }
+    } else if (message.voice) {
+      // ב. טיפול בקבלת הודעה קולית (STT)
+      console.log("Voice note update received from Telegram!");
+
+      // בדיקה האם כבוד הרב כיבה את שירות הזיהוי הקולי
+      const sttDisabled = await env.DATABASE.get(`stt_disabled:${chatId}`);
+      if (sttDisabled === "true") {
+        if (tempMsgId) {
+          await sendTelegram(env, "editMessageText", {
+            chat_id: chatId,
+            message_id: tempMsgId,
+            text: "🔇 כבוד הרב שלח הודעה קולית, אך שירות הזיהוי הקולי (STT) כבוי כעת. ניתן להפעילו באמצעות הפקודה /son."
+          });
+        }
+        return;
+      }
+
+      const sttService = env.STT_SERVICE;
+      if (!sttService) {
+        throw new Error("STT_SERVICE binding is missing in Main Worker.");
+      }
+
+      // שידור מצב "ששון מאזין..."
+      await sendTelegram(env, "sendChatAction", {
+        chat_id: chatId,
+        action: "record_voice"
+      });
+
       if (tempMsgId) {
         await sendTelegram(env, "editMessageText", {
           chat_id: chatId,
           message_id: tempMsgId,
-          text: "🔊 שירות ההודעות הקוליות הופעל עבור כבוד הרב. מעתה ששון ישלח גם הודעה קולית."
+          text: "📥 שומע ומפענח את הודעת כבוד הרב..."
         });
       }
-      return;
+
+      // 1. קבלת נתיב קובץ האודיו (file_path) מטלגרם
+      const fileId = message.voice.file_id;
+      const fileInfoRes = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/getFile?file_id=${fileId}`);
+      const fileInfo = await fileInfoRes.json() as { ok: boolean, result?: { file_path?: string } };
+      
+      if (!fileInfo.ok || !fileInfo.result?.file_path) {
+        throw new Error("Failed to retrieve voice file path from Telegram.");
+      }
+
+      // 2. הורדת קובץ האודיו הבינארי (.ogg) משרתי טלגרם לזיכרון הוורקר
+      const filePath = fileInfo.result.file_path;
+      const voiceFileRes = await fetch(`https://api.telegram.org/file/bot${env.TELEGRAM_BOT_TOKEN}/${filePath}`);
+      if (!voiceFileRes.ok) {
+        throw new Error("Failed to download voice file from Telegram.");
+      }
+
+      const audioBuffer = await voiceFileRes.arrayBuffer();
+
+      // 3. שליחת מערך הבייטס פנימית לוורקר ה-SSTT (Whisper) דרך Service Binding
+      console.log("Sending audio bytes to SSTT Service...");
+      const ssttRes = await sttService.fetch(new Request("http://sstt.local/", {
+        method: "POST",
+        headers: { "Content-Type": "application/octet-stream" },
+        body: audioBuffer
+      }));
+
+      if (!ssttRes.ok) {
+        const errDetails = await ssttRes.text();
+        throw new Error(`SSTT Service returned status ${ssttRes.status}. Details: ${errDetails}`);
+      }
+
+      // 4. קבלת הטקסט המתומלל בעברית
+      const ssttData = await ssttRes.json() as { text?: string };
+      userText = ssttData.text?.trim() || "";
+      console.log("Successfully transcribed text from SSTT:", userText);
+
+      if (!userText) {
+        if (tempMsgId) {
+          await sendTelegram(env, "editMessageText", {
+            chat_id: chatId,
+            message_id: tempMsgId,
+            text: "⚠️ ששון לא הצליח לשמוע מילים ברורות בהודעה הקולית. אנא נסה שנית או כתוב בטקסט."
+          });
+        }
+        return;
+      }
     }
 
     if (!env.TAVILY_API_KEY) {
@@ -165,7 +287,7 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env, ctx: Cloud
       }
     }
 
-    // הגדרת מערכת ממוקדת, קומפקטית וחסכונית במילים עם הזרקת תאריך דינמי
+    // הגדרת מערכת ממוקדת ומקוצרת עם הזרקת תאריך דינמי בעברית
     if (messages.length === 0) {
       const today = new Date();
       const formattedDate = today.toLocaleDateString("he-IL", { 
@@ -181,7 +303,7 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env, ctx: Cloud
         content: `שמך ששון (Sasson). אתה עוזר וירטואלי אישי לכבוד הרב, בעל יכולת חיפוש מידע ברשת. ` +
                  `התאריך היום: ${formattedDate}. ` +
                  `עליך לפנות למשתמש תמיד בכינוי 'כבוד הרב' בלשון נוכח-מכובד, ביראת כבוד עמוקה, לשמור על כבוד התורה ולציית לציוויו. ` +
-                 `ענה בעברית רהוטה, ממוקדת, קומפקטית וחסכונית במילים (בסביבות 100-150 מילים לכל היותר, ללא הקדמות או סיכומים מיותרים). ` +
+                 `ענה בעברית רהוטה, עניינית ומקיפה במעט (בסביבות 200-300 מילים במידת הצורך, הימנע מהארכות סרק ומסיכומים מיותרים). ` +
                  `שאילתות החיפוש עבור הכלי (tavilySearch) חייבות להיכתב באנגלית בלבד (לדוגמה: "israel news today") אלא אם התבקשת אחרת במפורש. נסח את התשובה הסופית בעברית.`
       });
     }
@@ -211,13 +333,13 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env, ctx: Cloud
     let activeMessages = [...messages];
     let aiResponse: any = null;
 
-    // פנייה ראשונה ל-AI (הגדרת max_tokens: 512 לתגובות קצרות וחסכוניות) [1]
+    // פנייה ראשונה ל-AI (הגדרת max_tokens: 512 לתגובות קצרות וחסכוניות)
     console.log("6. Calling Workers AI (Llama 3.3 70B Fast) - Turn 1...");
     try {
       aiResponse = await env.AI.run("@cf/meta/llama-3.3-70b-instruct-fp8-fast", {
         messages: activeMessages,
         tools,
-        max_tokens: 512 // מכסה בטוחה וחסכונית ל-Turn 1 [1]
+        max_tokens: 512 // מכסה בטוחה וחסכונית ל-Turn 1
       });
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);
@@ -271,7 +393,6 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env, ctx: Cloud
         console.log("8. Performing Tavily Search API call...");
         let searchResultsStr = "";
         try {
-          // הגדלת קטיעת הזמן ל-15 שניות המבטיחה מענה יציב גם בעומס רשת
           const tavilyRes = await fetch("https://api.tavily.com/search", {
             method: "POST",
             headers: {
@@ -300,8 +421,6 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env, ctx: Cloud
         } catch (err) {
           const errMsg = err instanceof Error ? err.message : String(err);
           console.error("Tavily Search call failed or timed out:", errMsg);
-          
-          // מנגנון התאוששות שקט (Graceful Degradation): במקום לקרוס, נבקש מה-AI להשתמש בידע הפנימי שלו
           searchResultsStr = "שגיאת חיפוש: החיפוש ברשת נכשל או לקח זמן רב מדי עקב עומס זמני. אנא השב לכבוד הרב על בסיס הידע הקיים שלך בלבד ללא תוצאות חיפוש חיות.";
         }
 
@@ -319,7 +438,7 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env, ctx: Cloud
           }
         ];
 
-        // מזינים את בחירת ה-AI
+        // מזינים את בחירת ה-AI (שימוש במחרוזת ריקה ולא null כדי לעבור בהצלחה וולידציית קלאודפלר)
         activeMessages.push({
           role: "assistant",
           content: aiResponse.response || "",
@@ -347,7 +466,7 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env, ctx: Cloud
         try {
           finalAiResponse = await env.AI.run("@cf/meta/llama-3.3-70b-instruct-fp8-fast", {
             messages: activeMessages,
-            max_tokens: 512 // מכסה בטוחה וחסכונית ל-Turn 2 [1]
+            max_tokens: 512 // מכסה בטוחה וחסכונית ל-Turn 2
           });
         } catch (err) {
           const errMsg = err instanceof Error ? err.message : String(err);
@@ -447,7 +566,7 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env, ctx: Cloud
   }
 }
 
-// פונקציית הגיבוי המורחבת לקריאה ישירה ל-NVIDIA NIM API מול המודל הענק Nemotron 3 Super 120B [1.2.7]
+// פונקציית הגיבוי המורחבת לקריאה ישירה ל-NVIDIA NIM API מול המודל הענק Nemotron 3 Super 120B
 async function callNvidiaFallback(messages: any[], env: Env, tools?: any[]): Promise<any> {
   if (!env.NVIDIA_API_KEY) {
     throw new Error("NVIDIA_API_KEY is missing in your environment variables. Cannot execute fallback.");
@@ -467,13 +586,13 @@ async function callNvidiaFallback(messages: any[], env: Env, tools?: any[]): Pro
     return msg;
   });
 
-  // בניית גוף הבקשה לנבידיה (עם הגבלת max_tokens: 512 לתגובות קצרות וחסכוניות) [1]
+  // בניית גוף הבקשה לנבידיה (עם הגבלת max_tokens: 512 לתגובות קצרות וחסכוניות)
   const bodyPayload: any = {
     model: "nvidia/nemotron-3-super-120b-a12b",
     messages: formattedMessages,
     temperature: 1,
     top_p: 0.95,
-    max_tokens: 512 // שימוש במכסה של 512 לתגובות ממוקדות [1]
+    max_tokens: 512 // שימוש במכסה של 512 לתגובות ממוקדות
   };
 
   // במידה והועברו כלים (בסבב הראשון), נצרף אותם לבקשה של נבידיה
