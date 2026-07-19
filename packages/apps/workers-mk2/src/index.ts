@@ -16,11 +16,11 @@ interface Env {
   TELEGRAM_BOT_TOKEN: string;
   TAVILY_API_KEY: string;
   TTS_SERVICE?: {
-    fetch(request: Request): Promise<Response>;
+    fetch(request: Request | string, init?: RequestInit): Promise<Response>;
   }; // חיבור פנימי לוורקר ה-TTS (ttss)
   STT_SERVICE?: {
-    fetch(request: Request): Promise<Response>;
-  }; // חיבור פנימי חדש לוורקר ה-STT (sstt)
+    fetch(request: Request | string, init?: RequestInit): Promise<Response>;
+  }; // חיבור פנימי לוורקר ה-STT (sstt)
   NVIDIA_API_KEY?: string; // מפתח ה-API של NVIDIA שיוגדר כסיקרט מוצפן
 }
 
@@ -240,11 +240,11 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env, ctx: Cloud
 
       // 3. שליחת מערך הבייטס פנימית לוורקר ה-SSTT (Whisper) דרך Service Binding
       console.log("Sending audio bytes to SSTT Service...");
-      const ssttRes = await sttService.fetch(new Request("http://sstt.local/", {
+      const ssttRes = await sttService.fetch("http://sstt.local/", {
         method: "POST",
         headers: { "Content-Type": "application/octet-stream" },
         body: audioBuffer
-      }));
+      });
 
       if (!ssttRes.ok) {
         const errDetails = await ssttRes.text();
@@ -303,7 +303,7 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env, ctx: Cloud
         content: `שמך ששון (Sasson). אתה עוזר וירטואלי אישי לכבוד הרב, בעל יכולת חיפוש מידע ברשת. ` +
                  `התאריך היום: ${formattedDate}. ` +
                  `עליך לפנות למשתמש תמיד בכינוי 'כבוד הרב' בלשון נוכח-מכובד, ביראת כבוד עמוקה, לשמור על כבוד התורה ולציית לציוויו. ` +
-                 `ענה בעברית רהוטה, עניינית ומקיפה במעט (בסביבות 200-300 מילים במידת הצורך, הימנע מהארכות סרק ומסיכומים מיותרים). ` +
+                 `ענה בעברית רהוטה, ממוקדת, קומפקטית וחסכונית במילים (בסביבות 100-150 מילים לכל היותר, ללא הקדמות או סיכומים מיותרים). ` +
                  `שאילתות החיפוש עבור הכלי (tavilySearch) חייבות להיכתב באנגלית בלבד (לדוגמה: "israel news today") אלא אם התבקשת אחרת במפורש. נסח את התשובה הסופית בעברית.`
       });
     }
@@ -333,25 +333,20 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env, ctx: Cloud
     let activeMessages = [...messages];
     let aiResponse: any = null;
 
-    // פנייה ראשונה ל-AI (הגדרת max_tokens: 512 לתגובות קצרות וחסכוניות)
-    console.log("6. Calling Workers AI (Llama 3.3 70B Fast) - Turn 1...");
+    // פנייה ראשונה ל-AI (שימוש בנבידיה 120B כמודל הראשי למהירות מירבית ואיכות עברית מעולה) [1.2.7]
+    console.log("6. Calling NVIDIA NIM API (Nemotron 120B) - Turn 1...");
     try {
+      aiResponse = await callNvidiaAPI(activeMessages, env, tools);
+    } catch (err) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      console.warn("NVIDIA NIM API Turn 1 failed, falling back to Workers AI (Llama 3.3 70B):", errMsg);
+      
+      // גיבוי ל-Llama 3.3 70B במקרה ונבידיה חווה איטיות או שגיאה
       aiResponse = await env.AI.run("@cf/meta/llama-3.3-70b-instruct-fp8-fast", {
         messages: activeMessages,
         tools,
-        max_tokens: 512 // מכסה בטוחה וחסכונית ל-Turn 1
+        max_tokens: 512 // מכסה בטוחה וחסכונית ל-Turn 1 [1]
       });
-    } catch (err) {
-      const errMsg = err instanceof Error ? err.message : String(err);
-      console.warn("Workers AI Turn 1 failed:", errMsg);
-      
-      // בדיקה האם מדובר בשגיאת חריגת מכסה יומית (4006) או שגיאת רשת כללית של ה-AI
-      if (errMsg.includes("4006") || errMsg.includes("allocation") || errMsg.includes("neurons") || errMsg.includes("free")) {
-        console.log("🚨 Daily free neurons limit reached. Activating NVIDIA 120B fallback WITH tools for Turn 1...");
-        aiResponse = await callNvidiaFallback(activeMessages, env, tools);
-      } else {
-        throw err;
-      }
     }
 
     console.log("AI First response output:", JSON.stringify(aiResponse));
@@ -438,7 +433,7 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env, ctx: Cloud
           }
         ];
 
-        // מזינים את בחירת ה-AI (שימוש במחרוזת ריקה ולא null כדי לעבור בהצלחה וולידציית קלאודפלר)
+        // מזינים את בחירת ה-AI
         activeMessages.push({
           role: "assistant",
           content: aiResponse.response || "",
@@ -461,23 +456,18 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env, ctx: Cloud
           });
         }
 
-        console.log("9. Calling Workers AI (Llama 3.3 70B Fast) - Turn 2 (Final Answer)...");
+        console.log("9. Calling NVIDIA NIM API (Nemotron 120B) - Turn 2 (Final Answer)...");
         let finalAiResponse: any = null;
         try {
-          finalAiResponse = await env.AI.run("@cf/meta/llama-3.3-70b-instruct-fp8-fast", {
-            messages: activeMessages,
-            max_tokens: 512 // מכסה בטוחה וחסכונית ל-Turn 2
-          });
+          finalAiResponse = await callNvidiaAPI(activeMessages, env);
         } catch (err) {
           const errMsg = err instanceof Error ? err.message : String(err);
-          console.warn("Workers AI Turn 2 failed:", errMsg);
-
-          if (errMsg.includes("4006") || errMsg.includes("allocation") || errMsg.includes("neurons") || errMsg.includes("free")) {
-            console.log("🚨 Daily free neurons limit reached. Activating NVIDIA 120B fallback for Turn 2...");
-            finalAiResponse = await callNvidiaFallback(activeMessages, env);
-          } else {
-            throw err;
-          }
+          console.warn("NVIDIA NIM API Turn 2 failed, falling back to Workers AI (Llama 3.3 70B):", errMsg);
+          
+          finalAiResponse = await env.AI.run("@cf/meta/llama-3.3-70b-instruct-fp8-fast", {
+            messages: activeMessages,
+            max_tokens: 512 // מכסה בטוחה וחסכונית ל-Turn 2 [1]
+          });
         }
 
         finalAnswer = finalAiResponse.response || "לא התקבלה תשובה סופית.";
@@ -502,6 +492,7 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env, ctx: Cloud
     // ---------------------------------------------------------------------
     // אינטגרציה מובנית ואסינכרונית עם וורקר ה-TTS דרך SERVICE BINDING
     // ---------------------------------------------------------------------
+    // בדיקה מקדימה ב-KV האם כבוד הרב כיבה את שירות ההודעות הקוליות [1]
     const voiceDisabled = await env.DATABASE.get(`voice_disabled:${chatId}`);
     const ttsService = env.TTS_SERVICE; 
 
@@ -509,14 +500,18 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env, ctx: Cloud
       console.log("12. Triggering TTS Worker via Service Binding...");
       ctx.waitUntil((async () => {
         try {
-          const ttsRes = await ttsService.fetch(new Request("http://ttss.local/", {
+          // ניקוי תווים מיוחדים ומארקדאון כדי להבטיח קריאה חלקה ונקייה ל-TTS
+          const cleanTextForTTS = stripMarkdownAndEmojis(finalAnswer);
+          console.log("Clean text prepared for TTS:", cleanTextForTTS);
+
+          const ttsRes = await ttsService.fetch("http://ttss.local/", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
               chatId: chatId,
-              text: finalAnswer
+              text: cleanTextForTTS
             })
-          }));
+          });
           console.log("TTS Worker Service Binding response status:", ttsRes.status);
         } catch (ttsErr) {
           console.error("Failed to trigger TTS Worker via Service Binding:", ttsErr);
@@ -566,10 +561,10 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env, ctx: Cloud
   }
 }
 
-// פונקציית הגיבוי המורחבת לקריאה ישירה ל-NVIDIA NIM API מול המודל הענק Nemotron 3 Super 120B
-async function callNvidiaFallback(messages: any[], env: Env, tools?: any[]): Promise<any> {
+// פונקציית הקריאה הישירה ל-NVIDIA NIM API מול המודל הענק Nemotron 3 Super 120B (כעת מוגדר כמודל הראשי) [1.2.7]
+async function callNvidiaAPI(messages: any[], env: Env, tools?: any[]): Promise<any> {
   if (!env.NVIDIA_API_KEY) {
-    throw new Error("NVIDIA_API_KEY is missing in your environment variables. Cannot execute fallback.");
+    throw new Error("NVIDIA_API_KEY is missing in your environment variables. Cannot execute API call.");
   }
 
   const nvidiaUrl = "https://integrate.api.nvidia.com/v1/chat/completions";
@@ -592,7 +587,7 @@ async function callNvidiaFallback(messages: any[], env: Env, tools?: any[]): Pro
     messages: formattedMessages,
     temperature: 1,
     top_p: 0.95,
-    max_tokens: 512 // שימוש במכסה של 512 לתגובות ממוקדות
+    max_tokens: 512 // שימוש במכסה של 512 לתגובות ממוקדות [1]
   };
 
   // במידה והועברו כלים (בסבב הראשון), נצרף אותם לבקשה של נבידיה
@@ -609,7 +604,7 @@ async function callNvidiaFallback(messages: any[], env: Env, tools?: any[]): Pro
       "Authorization": `Bearer ${env.NVIDIA_API_KEY}`
     },
     body: JSON.stringify(bodyPayload),
-    signal: AbortSignal.timeout(20000) // הגנת קטיעת זמן של 20 שניות בעומס רשת
+    signal: AbortSignal.timeout(20000) // הגנת קטיעת זמן של 20 שניות בעומס רשת [2]
   });
 
   if (!response.ok) {
@@ -628,6 +623,17 @@ async function callNvidiaFallback(messages: any[], env: Env, tools?: any[]): Pro
     response: textAnswer,
     tool_calls: toolCalls
   };
+}
+
+// פונקציית עזר להסרת תווי מארקדאון ואימוג'ים לקבלת קריאה נקייה וחלקה ב-TTS
+function stripMarkdownAndEmojis(text: string): string {
+  return text
+    .replace(/[*_`#~[\]()]/g, "") // הסרת תווי מארקדאון
+    .replace(/[\u{1F300}-\u{1F9FF}]/gu, "") // הסרת אימוג'ים מכל הסוגים
+    .replace(/[\u{2700}-\u{27BF}]/gu, "")
+    .replace(/[\u{2600}-\u{26FF}]/gu, "")
+    .replace(/[\r\n]+/g, " ") // החלפת ירידות שורה ברווחים כדי להקל על רציפות ההקראה
+    .trim();
 }
 
 function chunkText(text: string): string[] {
