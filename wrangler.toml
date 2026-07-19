@@ -53,3 +53,5 @@ id = "8f517f7c1c554db1b268d976683530d3"
 [[services]]
 binding = "TTS_SERVICE"
 service = "ttss" 
+binding = "STT_SERVICE"
+service = "sstt"
