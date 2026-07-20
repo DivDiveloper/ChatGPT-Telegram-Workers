@@ -51,10 +51,10 @@ export default {
 
     try {
       const update = await request.json() as TelegramUpdate;
-      
+
       // הרצת עיבוד ההודעה ברקע - העברת ה-ctx כפרמטר
       ctx.waitUntil(handleTelegramUpdate(update, env, ctx));
-      
+
       return new Response(JSON.stringify({ ok: true }), {
         status: 200,
         headers: { "Content-Type": "application/json" }
@@ -78,7 +78,7 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env, ctx: Cloud
       console.log("Aborting: Update does not contain a message object.");
       return;
     }
-    
+
     // בדיקה האם ההודעה מכילה טקסט או הודעה קולית (עבור STT)
     if (!message.text && !message.voice) {
       console.log("Aborting: Message contains neither text nor voice.");
@@ -224,7 +224,7 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env, ctx: Cloud
       const fileId = message.voice.file_id;
       const fileInfoRes = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/getFile?file_id=${fileId}`);
       const fileInfo = await fileInfoRes.json() as { ok: boolean, result?: { file_path?: string } };
-      
+
       if (!fileInfo.ok || !fileInfo.result?.file_path) {
         throw new Error("Failed to retrieve voice file path from Telegram.");
       }
@@ -290,16 +290,16 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env, ctx: Cloud
     // הגדרת מערכת ממוקדת ומקוצרת עם הזרקת תאריך דינמי בעברית
     if (messages.length === 0) {
       const today = new Date();
-      const formattedDate = today.toLocaleDateString("he-IL", { 
-        year: "numeric", 
-        month: "long", 
-        day: "numeric", 
+      const formattedDate = today.toLocaleDateString("he-IL", {
+        year: "numeric",
+        month: "long",
+        day: "numeric",
         weekday: "long",
-        timeZone: "Asia/Jerusalem" 
+        timeZone: "Asia/Jerusalem"
       });
 
-      messages.push({ 
-        role: "system", 
+      messages.push({
+        role: "system",
         content: `שמך ששון (Sasson). אתה עוזר וירטואלי אישי לכבוד הרב, בעל יכולת חיפוש מידע ברשת. ` +
                  `התאריך היום: ${formattedDate}. ` +
                  `עליך לפנות למשתמש תמיד בכינוי 'כבוד הרב' בלשון נוכח-מכובד, ביראת כבוד עמוקה, לשמור על כבוד התורה ולציית לציוויו. ` +
@@ -340,7 +340,7 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env, ctx: Cloud
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);
       console.warn("NVIDIA NIM API Turn 1 failed, falling back to Workers AI (Llama 3.3 70B):", errMsg);
-      
+
       // גיבוי ל-Llama 3.3 70B במקרה ונבידיה חווה איטיות או שגיאה
       aiResponse = await env.AI.run("@cf/meta/llama-3.3-70b-instruct-fp8-fast", {
         messages: activeMessages,
@@ -398,7 +398,7 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env, ctx: Cloud
               query: searchQuery,
               max_results: 5
             }),
-            signal: AbortSignal.timeout(15000) 
+            signal: AbortSignal.timeout(15000)
           });
 
           console.log("Tavily response status:", tavilyRes.status);
@@ -463,7 +463,7 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env, ctx: Cloud
         } catch (err) {
           const errMsg = err instanceof Error ? err.message : String(err);
           console.warn("NVIDIA NIM API Turn 2 failed, falling back to Workers AI (Llama 3.3 70B):", errMsg);
-          
+
           finalAiResponse = await env.AI.run("@cf/meta/llama-3.3-70b-instruct-fp8-fast", {
             messages: activeMessages,
             max_tokens: 512 // מכסה בטוחה וחסכונית ל-Turn 2 [1]
@@ -494,7 +494,7 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env, ctx: Cloud
     // ---------------------------------------------------------------------
     // בדיקה מקדימה ב-KV האם כבוד הרב כיבה את שירות ההודעות הקוליות [1]
     const voiceDisabled = await env.DATABASE.get(`voice_disabled:${chatId}`);
-    const ttsService = env.TTS_SERVICE; 
+    const ttsService = env.TTS_SERVICE;
 
     if (ttsService && voiceDisabled !== "true") {
       console.log("12. Triggering TTS Worker via Service Binding...");
@@ -504,17 +504,55 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env, ctx: Cloud
           const cleanTextForTTS = stripMarkdownAndEmojis(finalAnswer);
           console.log("Clean text prepared for TTS:", cleanTextForTTS);
 
-          const ttsRes = await ttsService.fetch("http://ttss.local/", {
+          // חשוב: הנתיב חייב להיות /v1/audio/speech, והשדה חייב להיקרא "input"
+          // (בהתאם לחוזה שהוגדר בוורקר ה-TTS עצמו)
+          const ttsRes = await ttsService.fetch("http://ttss.local/v1/audio/speech", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
-              chatId: chatId,
-              text: cleanTextForTTS
+              input: cleanTextForTTS,
+              voice: "he-IL-AvriNeural",
+              speed: 1.0
             })
           });
+
           console.log("TTS Worker Service Binding response status:", ttsRes.status);
+
+          if (!ttsRes.ok) {
+            const errText = await ttsRes.text();
+            console.error("TTS Worker returned an error:", errText);
+            return;
+          }
+
+          // קבלת ה-mp3 הבינארי מתשובת הוורקר
+          const audioBuffer = await ttsRes.arrayBuffer();
+
+          // בניית multipart/form-data ושליחה בפועל לטלגרם דרך sendVoice
+          const formData = new FormData();
+          formData.append("chat_id", chatId);
+          formData.append(
+            "voice",
+            new Blob([audioBuffer], { type: "audio/mpeg" }),
+            "voice.mp3"
+          );
+
+          const telegramRes = await fetch(
+            `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendVoice`,
+            {
+              method: "POST",
+              body: formData,
+              signal: AbortSignal.timeout(20000)
+            }
+          );
+
+          const telegramData = await telegramRes.json() as { ok: boolean, description?: string };
+          if (!telegramData.ok) {
+            console.error("Failed to send voice message to Telegram:", telegramData.description);
+          } else {
+            console.log("Voice message successfully sent to Telegram.");
+          }
         } catch (ttsErr) {
-          console.error("Failed to trigger TTS Worker via Service Binding:", ttsErr);
+          console.error("Failed to trigger TTS Worker or send voice to Telegram:", ttsErr);
         }
       })());
     } else {
@@ -526,16 +564,16 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env, ctx: Cloud
       console.log("13. Splitting answer and streaming chunks to Telegram...");
       const chunks = chunkText(finalAnswer);
       console.log(`Answer divided into ${chunks.length} chunks.`);
-      
+
       if (chunks.length > 0) {
         await sendTelegramWithMarkdownFallback(env, chatId, tempMsgId, chunks[0]);
-        
+
         for (let i = 1; i < chunks.length; i++) {
           await sendTelegram(env, "sendChatAction", {
             chat_id: chatId,
             action: "typing"
           });
-          
+
           await new Promise(resolve => setTimeout(resolve, 800));
           await sendNewTelegramWithMarkdownFallback(env, chatId, chunks[i]);
         }
@@ -546,7 +584,7 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env, ctx: Cloud
   } catch (err) {
     const errMsg = err instanceof Error ? err.message : String(err);
     console.error("CRITICAL AI / DATABASE Error:", errMsg);
-    
+
     if (tempMsgId && chatId) {
       try {
         await sendTelegram(env, "editMessageText", {
