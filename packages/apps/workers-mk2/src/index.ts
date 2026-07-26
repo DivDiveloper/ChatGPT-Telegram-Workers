@@ -23,7 +23,7 @@ interface Env {
   }; // חיבור פנימי לוורקר ה-STT (sstt)
   NEWS_SERVICE?: {
     fetch(request: Request | string, init?: RequestInit): Promise<Response>;
-  }; // חיבור פנימי חדש לוורקר ה-News (news) [1]
+  }; // חיבור פנימי חדש לוורקר ה-News (news)
   NVIDIA_API_KEY?: string; // מפתח ה-API של NVIDIA שיוגדר כסיקרט מוצפן
 }
 
@@ -114,7 +114,7 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env, ctx: Cloud
       throw new Error("DATABASE binding (KV namespace) is missing.");
     }
 
-    // א. טיפול בפקודת טקסט ישירות (אם יש טקסט)
+    // א. טיפול בפקודות טקסט ישירות (אם יש טקסט)
     if (message.text) {
       userText = message.text.trim();
 
@@ -188,7 +188,7 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env, ctx: Cloud
         return;
       }
 
-      // ד. טיפול בפקודת חדשות (/news) [1]
+      // ד. טיפול בפקודת חדשות (/news)
       if (userText === "/news") {
         console.log(`Command received: triggering news-agent for chat ${chatId}`);
         
@@ -212,18 +212,14 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env, ctx: Cloud
           });
         }
 
-        // קריאה מהירה ואסינכרונית לוורקר ה-News ברקע [1]
-        ctx.waitUntil((async () => {
-          try {
-            await env.NEWS_SERVICE.fetch("http://news.local/", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ chatId })
-            });
-          } catch (err) {
-            console.error("Failed to trigger News Service:", err);
-          }
-        })());
+        // פנייה פנימית מול ה-Service Binding לקבלת תוצאות החדשות (תיקון הסוגריים האנונימיים של ה-waitUntil)
+        ctx.waitUntil(env.NEWS_SERVICE.fetch("http://news.local/", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ chatId })
+        }).catch(err => {
+          console.error("Failed to trigger News Service:", err);
+        }));
         return;
       }
     } else if (message.voice) {
@@ -375,7 +371,7 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env, ctx: Cloud
     let activeMessages = [...messages];
     let aiResponse: any = null;
 
-    // פנייה ראשונה ל-AI (שימוש בנבידיה 120B כמודל הראשי למהירות מירבית ואיכות עברית מעולה) [1.2.7]
+    // פנייה ראשונה ל-AI (שימוש בנבידיה 120B כמודל הראשי למהירות מירבית ואיכות עברית מעולה)
     console.log("6. Calling NVIDIA NIM API (Nemotron 120B) - Turn 1...");
     try {
       aiResponse = await callNvidiaAPI(activeMessages, env, tools);
@@ -387,7 +383,7 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env, ctx: Cloud
       aiResponse = await env.AI.run("@cf/meta/llama-3.3-70b-instruct-fp8-fast", {
         messages: activeMessages,
         tools,
-        max_tokens: 512 // מכסה בטוחה וחסכונית ל-Turn 1 [1]
+        max_tokens: 512 // מכסה בטוחה וחסכונית ל-Turn 1
       });
     }
 
@@ -470,3 +466,123 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env, ctx: Cloud
             type: "function",
             function: {
               name: "tavilySearch",
+              arguments: argsString
+            }
+          }
+        ];
+
+        // מזינים את בחירת ה-AI
+        activeMessages.push({
+          role: "assistant",
+          content: aiResponse.response || "",
+          tool_calls: formattedToolCalls
+        });
+
+        // מזינים את תוצאות החיפוש
+        activeMessages.push({
+          role: "tool",
+          tool_call_id: toolCallId,
+          name: "tavilySearch",
+          content: searchResultsStr
+        });
+
+        if (tempMsgId) {
+          await sendTelegram(env, "editMessageText", {
+            chat_id: chatId,
+            message_id: tempMsgId,
+            text: `✍️ מנסח תשובה עבור כבוד הרב...`
+          });
+        }
+
+        console.log("9. Calling Workers AI (Llama 3.3 70B) - Turn 2 (Final Answer)...");
+        let finalAiResponse: any = null;
+        try {
+          finalAiResponse = await callNvidiaAPI(activeMessages, env);
+        } catch (err) {
+          const errMsg = err instanceof Error ? err.message : String(err);
+          console.warn("NVIDIA NIM API Turn 2 failed, falling back to Workers AI (Llama 3.3 70B):", errMsg);
+          
+          finalAiResponse = await env.AI.run("@cf/meta/llama-3.3-70b-instruct-fp8-fast", {
+            messages: activeMessages,
+            max_tokens: 512 // מכסה בטוחה וחסכונית ל-Turn 2
+          });
+        }
+
+        finalAnswer = finalAiResponse.response || "לא התקבלה תשובה סופית.";
+      }
+    } else {
+      console.log("AI responded directly, no tool call needed.");
+      finalAnswer = aiResponse.response || "לא הצלחתי לעבד את הפנייה.";
+    }
+
+    console.log("10. Final Answer calculated:", finalAnswer);
+
+    // שמירת התשובה המלאה לצורך היסטוריית השיחה
+    messages.push({ role: "assistant", content: finalAnswer });
+
+    if (messages.length > 11) {
+      messages = [messages[0], ...messages.slice(-10)];
+    }
+
+    await env.DATABASE.put(chatId, JSON.stringify(messages), { expirationTtl: 7200 });
+    console.log("11. Conversation history updated in KV database.");
+
+    // ---------------------------------------------------------------------
+    // אינטגרציה מובנית ואסינכרונית עם וורקר ה-TTS דרך SERVICE BINDING
+    // ---------------------------------------------------------------------
+    const voiceDisabled = await env.DATABASE.get(`voice_disabled:${chatId}`);
+    const ttsService = env.TTS_SERVICE; 
+
+    if (ttsService && voiceDisabled !== "true") {
+      console.log("12. Triggering TTS Worker via Service Binding...");
+      ctx.waitUntil((async () => {
+        try {
+          // ניקוי תווים מיוחדים ומארקדאון כדי להבטיח קריאה חלקה ונקייה ל-TTS
+          const cleanTextForTTS = stripMarkdownAndEmojis(finalAnswer);
+          console.log("Clean text prepared for TTS:", cleanTextForTTS);
+
+          // חשוב: הנתיב חייב להיות /v1/audio/speech, והשדה חייב להיקרא "input"
+          const ttsRes = await ttsService.fetch("http://ttss.local/v1/audio/speech", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              input: cleanTextForTTS,
+              voice: "he-IL-AvriNeural",
+              speed: 2.5 // מהירות הדיבור המהירה שביקשת
+            })
+          });
+
+          console.log("TTS Worker Service Binding response status:", ttsRes.status);
+
+          if (!ttsRes.ok) {
+            const errText = await ttsRes.text();
+            console.error("TTS Worker returned an error:", errText);
+            return;
+          }
+
+          // קבלת ה-mp3 הבינארי מתשובת הוורקר
+          const audioBuffer = await ttsRes.arrayBuffer();
+
+          // בניית multipart/form-data ושליחה בפועל לטלגרם דרך sendVoice
+          const formData = new FormData();
+          formData.append("chat_id", chatId);
+          formData.append(
+            "voice",
+            new Blob([audioBuffer], { type: "audio/mpeg" }),
+            "voice.mp3"
+          );
+
+          const telegramRes = await fetch(
+            `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendVoice`,
+            {
+              method: "POST",
+              body: formData,
+              signal: AbortSignal.timeout(20000)
+            }
+          );
+
+          const telegramData = await telegramRes.json() as { ok: boolean, description?: string };
+          if (!telegramData.ok) {
+            console.error("Failed to send voice message to Telegram:", telegramData.description);
+          } else {
+            console.log("Voice message success
