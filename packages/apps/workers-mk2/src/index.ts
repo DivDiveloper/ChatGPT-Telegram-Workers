@@ -548,7 +548,7 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env, ctx: Cloud
             body: JSON.stringify({
               input: cleanTextForTTS,
               voice: "he-IL-AvriNeural",
-              speed: 2.5 // מהירות הדיבור המהירה שביקשת
+              speed: 1.5 // מהירות הדיבור המהירה שביקשת
             })
           });
 
