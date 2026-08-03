@@ -57,3 +57,12 @@ service = "ttss"
 [[services]]
 binding = "STT_SERVICE"
 service = "sstt"
+
+
+[[services]]
+binding = "NEWS_SERVICE"
+service = "news"
+
+[[services]]
+binding = "ZMAN_SERVICE"
+service = "zman"
