@@ -24,6 +24,9 @@ interface Env {
   NEWS_SERVICE?: {
     fetch(request: Request | string, init?: RequestInit): Promise<Response>;
   }; // חיבור פנימי חדש לוורקר ה-News (news)
+  ZMAN_SERVICE?: {
+    fetch(request: Request | string, init?: RequestInit): Promise<Response>;
+  }; // חיבור פנימי חדש לוורקר ה-Zmanים (zman) [1]
   NVIDIA_API_KEY?: string; // מפתח ה-API של NVIDIA שיוגדר כסיקרט מוצפן
 }
 
@@ -188,7 +191,7 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env, ctx: Cloud
         return;
       }
 
-      // ד. טיפול בפקודת חדשות (/news)
+      // ד. טיפול בפקודת חדשות (/news) [1]
       if (userText === "/news") {
         console.log(`Command received: triggering news-agent for chat ${chatId}`);
         
@@ -212,18 +215,53 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env, ctx: Cloud
           });
         }
 
-        // פנייה פנימית מול ה-Service Binding לקבלת תוצאות החדשות
+        // קריאה מהירה ואסינכרונית לוורקר ה-News ברקע
         ctx.waitUntil(env.NEWS_SERVICE.fetch("http://news.local/", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ chatId })
+          body: JSON.stringify({ chatId: chatId })
         }).catch(err => {
           console.error("Failed to trigger News Service:", err);
         }));
         return;
       }
+
+      // ה. טיפול בפקודת זמנים ומזג אוויר (/zman) [2]
+      if (userText === "/zman") {
+        console.log(`Command received: triggering zman-agent for chat ${chatId}`);
+        
+        if (!env.ZMAN_SERVICE) {
+          if (tempMsgId) {
+            await sendTelegram(env, "editMessageText", {
+              chat_id: chatId,
+              message_id: tempMsgId,
+              text: "⚠️ ששון לא יכול למשוך זמנים: לא הוגדר חיבור שירות (Service Binding) עבור ZMAN_SERVICE בוורקר."
+            });
+          }
+          return;
+        }
+
+        // שידור עדכון זמני לטלגרם (ללא המילה מדדים)
+        if (tempMsgId) {
+          await sendTelegram(env, "editMessageText", {
+            chat_id: chatId,
+            message_id: tempMsgId,
+            text: "📊 ששון אוסף את נתוני מזג האוויר וזמני ההלכה עבור כבוד הרב..."
+          });
+        }
+
+        // פנייה פנימית מול ה-Service Binding והעברת ה-tempMsgId כדי שוורקר הזמנים יערוך את ההודעה ישירות
+        ctx.waitUntil(env.ZMAN_SERVICE.fetch("http://zman.local/", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ chatId: chatId, tempMsgId: tempMsgId })
+        }).catch(err => {
+          console.error("Failed to trigger Zman Service:", err);
+        }));
+        return;
+      }
     } else if (message.voice) {
-      // ב. טיפול בקבלת הודעה קולית (STT)
+      // ב. טיפול בקבלת הודעה קולית (STT) [1]
       console.log("Voice note update received from Telegram!");
 
       // בדיקה האם כבוד הרב כיבה את שירות הזיהוי הקולי
@@ -260,7 +298,7 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env, ctx: Cloud
 
       // 1. קבלת נתיב קובץ האודיו (file_path) מטלגרם
       const fileId = message.voice.file_id;
-      const fileInfoRes = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/getFile?file_id=${fileId}`);
+      const fileInfoRes = await fetch("https://api.telegram.org/bot" + env.TELEGRAM_BOT_TOKEN + "/getFile?file_id=" + fileId);
       const fileInfo = await fileInfoRes.json() as { ok: boolean, result?: { file_path?: string } };
 
       if (!fileInfo.ok || !fileInfo.result?.file_path) {
@@ -269,7 +307,7 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env, ctx: Cloud
 
       // 2. הורדת קובץ האודיו הבינארי (.ogg) משרתי טלגרם לזיכרון הוורקר
       const filePath = fileInfo.result.file_path;
-      const voiceFileRes = await fetch(`https://api.telegram.org/file/bot${env.TELEGRAM_BOT_TOKEN}/${filePath}`);
+      const voiceFileRes = await fetch("https://api.telegram.org/file/bot" + env.TELEGRAM_BOT_TOKEN + "/" + filePath);
       if (!voiceFileRes.ok) {
         throw new Error("Failed to download voice file from Telegram.");
       }
@@ -299,7 +337,7 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env, ctx: Cloud
           await sendTelegram(env, "editMessageText", {
             chat_id: chatId,
             message_id: tempMsgId,
-            text: "⚠️ ששון לא הצליח לשמוע מילים ברורות בהודעה הקולית. אנא נסה שנית או כתוב בטקסט."
+            text: "⚠️ ששון לא הצלחתי לשמוע מילים ברורות בהודעה הקולית. אנא נסה שנית או כתוב בטקסט."
           });
         }
         return;
@@ -430,7 +468,7 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env, ctx: Cloud
             method: "POST",
             headers: {
               "Content-Type": "application/json",
-              "Authorization": `Bearer ${env.TAVILY_API_KEY}`
+              "Authorization": "Bearer " + env.TAVILY_API_KEY
             },
             body: JSON.stringify({
               query: searchQuery,
@@ -471,7 +509,7 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env, ctx: Cloud
           }
         ];
 
-        // מזינים את בחירת ה-AI
+        // מזינים את בחירת ה-AI (שימוש במחרוזת ריקה ולא null כדי לעבור בהצלחה וולידציית קלאודפלר)
         activeMessages.push({
           role: "assistant",
           content: aiResponse.response || "",
@@ -494,7 +532,7 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env, ctx: Cloud
           });
         }
 
-        console.log("9. Calling NVIDIA NIM API (Nemotron 120B) - Turn 2 (Final Answer)...");
+        console.log("9. Calling Workers AI (Llama 3.3 70B) - Turn 2 (Final Answer)...");
         let finalAiResponse: any = null;
         try {
           finalAiResponse = await callNvidiaAPI(activeMessages, env);
@@ -541,14 +579,14 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env, ctx: Cloud
           const cleanTextForTTS = stripMarkdownAndEmojis(finalAnswer);
           console.log("Clean text prepared for TTS:", cleanTextForTTS);
 
-          // פנייה פנימית מול ה-Service Binding לקבלת קובץ השמע
+          // חשוב: הנתיב חייב להיות /v1/audio/speech, והשדה חייב להיקרא "input"
           const ttsRes = await ttsService.fetch("http://ttss.local/v1/audio/speech", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
               input: cleanTextForTTS,
               voice: "he-IL-AvriNeural",
-              speed: 1.5 // מהירות הדיבור המהירה שביקשת
+              speed: 2.5 // מהירות הדיבור המהירה שביקשת
             })
           });
 
@@ -573,7 +611,7 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env, ctx: Cloud
           );
 
           const telegramRes = await fetch(
-            `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendVoice`,
+            "https://api.telegram.org/bot" + env.TELEGRAM_BOT_TOKEN + "/sendVoice",
             {
               method: "POST",
               body: formData,
@@ -619,14 +657,14 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env, ctx: Cloud
 
   } catch (err) {
     const errMsg = err instanceof Error ? err.message : String(err);
-    console.error("CRITICAL AI / DATABASE Error:", errMsg);
+    console.error("CRITICAL AI / DATABASE Error: " + errMsg);
 
     if (tempMsgId && chatId) {
       try {
         await sendTelegram(env, "editMessageText", {
           chat_id: chatId,
           message_id: tempMsgId,
-          text: `⚠️ אירעה שגיאה במהלך עיבוד השיחה: ${errMsg}`
+          text: "⚠️ אירעה שגיאה במהלך עיבוד השיחה: " + errMsg
         });
       } catch (teleErr) {
         console.error("Failed to notify user about error via Telegram:", teleErr);
@@ -675,15 +713,15 @@ async function callNvidiaAPI(messages: any[], env: Env, tools?: any[]): Promise<
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      "Authorization": `Bearer ${env.NVIDIA_API_KEY}`
+      "Authorization": "Bearer " + env.NVIDIA_API_KEY
     },
     body: JSON.stringify(bodyPayload),
-    signal: AbortSignal.timeout(20000) // הגנת קטיעת זמן של 20 שניות בעומס רשת
+    signal: AbortSignal.timeout(20000)
   });
 
   if (!response.ok) {
     const errText = await response.text();
-    throw new Error(`NVIDIA API returned status ${response.status}. Details: ${errText}`);
+    throw new Error("NVIDIA API returned status " + response.status + ". Details: " + errText);
   }
 
   const resJson = await response.json() as any;
@@ -742,12 +780,12 @@ function chunkText(text: string): string[] {
 }
 
 async function sendTelegram(env: Env, method: string, payload: any): Promise<any> {
-  const url = `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/${method}`;
+  const url = "https://api.telegram.org/bot" + env.TELEGRAM_BOT_TOKEN + "/" + method;
   const response = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
-    signal: AbortSignal.timeout(15000) // הגנת קטיעת זמן של 15 שניות לקריאות מול טלגרם כדי למנוע תקיעות
+    signal: AbortSignal.timeout(15000)
   });
   return response.json();
 }
@@ -794,4 +832,4 @@ async function sendNewTelegramWithMarkdownFallback(
     });
   }
   return res;
-}
+            }
