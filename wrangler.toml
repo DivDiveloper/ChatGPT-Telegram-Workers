@@ -66,3 +66,8 @@ service = "news"
 [[services]]
 binding = "ZMAN_SERVICE"
 service = "zman"
+
+[[services]]
+binding = "LNEWS_SERVICE"
+service = "lnews"
+
