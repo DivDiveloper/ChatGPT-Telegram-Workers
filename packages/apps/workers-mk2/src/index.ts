@@ -30,6 +30,9 @@ interface Env {
   LNEWS_SERVICE?: {
     fetch(request: Request | string, init?: RequestInit): Promise<Response>;
   }; // חיבור פנימי חדש לוורקר השידורים החיים (lnews)
+  MOVI_SERVICE?: {
+    fetch(request: Request | string, init?: RequestInit): Promise<Response>;
+  }; // חיבור פנימי חדש לוורקר הסרטונים (movi)
   NVIDIA_API_KEY?: string; // מפתח ה-API של NVIDIA שיוגדר כסיקרט מוצפן
 }
 
@@ -289,6 +292,39 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env, ctx: Cloud
           body: JSON.stringify({ chatId: chatId, tempMsgId: tempMsgId })
         }).catch(err => {
           console.error("Failed to trigger Lnews Service:", err);
+        }));
+        return;
+      }
+
+      // ז. טיפול בפקודת סרטון יוטיוב (/movi)
+      if (userText === "/movi") {
+        console.log("Command received: triggering movi-agent");
+        
+        if (!env.MOVI_SERVICE) {
+          if (tempMsgId) {
+            await sendTelegram(env, "editMessageText", {
+              chat_id: chatId,
+              message_id: tempMsgId,
+              text: "⚠️ ששון לא יכול למשוך סרטון: לא הוגדר חיבור שירות (Service Binding) עבור MOVI_SERVICE בוורקר."
+            });
+          }
+          return;
+        }
+
+        if (tempMsgId) {
+          await sendTelegram(env, "editMessageText", {
+            chat_id: chatId,
+            message_id: tempMsgId,
+            text: "🎬 ששון מחפש ומסנן את הסרטון החדש מ-24 השעות האחרונות עבור כבוד הרב..."
+          });
+        }
+
+        ctx.waitUntil(env.MOVI_SERVICE.fetch("http://movi.local/", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ chatId: chatId, tempMsgId: tempMsgId })
+        }).catch(err => {
+          console.error("Failed to trigger Movi Service:", err);
         }));
         return;
       }
