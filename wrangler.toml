@@ -71,3 +71,7 @@ service = "zman"
 binding = "LNEWS_SERVICE"
 service = "lnews"
 
+[[services]]
+binding = "MOVI_SERVICE"
+service = "movi"
+
