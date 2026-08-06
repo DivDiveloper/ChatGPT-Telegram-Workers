@@ -595,8 +595,11 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env, ctx: Cloud
         // ⚠️ תיקון: מעבירים את הגדרת ה-tools גם בסיבוב השני.
         // חלק מהספקים (ובפרט ולידציה קפדנית) דוחים בקוד 400 היסטוריית שיחה שמכילה
         // tool_calls/tool כאשר ה-tools schema לא הוצהר גם בבקשה הנוכחית.
-        console.log("9. Calling LLM Pipeline Turn 2 (Final Answer)...");
-        const finalAiResponse = await executeLLMPipeline(activeMessages, env, tools);
+        //
+        // ⚠️ תיקון נוסף: מתחילים את סיבוב 2 מאותו ספק שענה בסיבוב 1 (aiResponse.provider),
+        // ולא תמיד חוזרים ל-Gemini. כך לא "מאכילים" ספק אחד עם tool_call שנוצר אצל ספק אחר.
+        console.log("9. Calling LLM Pipeline Turn 2 (Final Answer), continuing from provider: " + (aiResponse.provider || "gemini"));
+        const finalAiResponse = await executeLLMPipeline(activeMessages, env, tools, aiResponse.provider || "gemini");
         finalAnswer = finalAiResponse.response || "לא התקבלה תשובה סופית.";
       }
     } else {
@@ -728,35 +731,58 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env, ctx: Cloud
 // 🤖 מנגנון 3 מודלים מדורג (3-Tier LLM Fallback Pipeline)
 // ============================================================================
 
-async function executeLLMPipeline(messages: any[], env: Env, tools?: any[]): Promise<any> {
-  // 1. ניסיון 1 (ראשי) - פנייה ישירה לגוגל מול gemini-3.5-flash-lite
-  try {
-    return await callGeminiAPI(messages, env, tools);
-  } catch (err1) {
-    const msg1 = err1 instanceof Error ? err1.message : String(err1);
-    console.warn("Model 1 (Google Gemini gemini-3.5-flash-lite) failed, falling back to Model 2 (NVIDIA NIM):", msg1);
+type LLMProvider = "gemini" | "nvidia" | "workers-ai";
 
-    // 2. ניסיון 2 (גיבוי ראשון) - פנייה לנבידיה מול Nemotron 120B
+const PROVIDER_ORDER: LLMProvider[] = ["gemini", "nvidia", "workers-ai"];
+
+// ⚠️ תיקון: executeLLMPipeline מקבל כעת startProvider אופציונלי.
+// כשמעבירים אליו את ה-provider שענה בסיבוב הקודם (למשל turn 1), הוא מתחיל את שרשרת
+// הניסיונות בדיוק מאותו ספק במקום תמיד לחזור להתחיל מ-Gemini. כך נמנע מצב שבו
+// tool_call שנוצר ע"י ספק אחד (עם הפורמט/שדות הספציפיים שלו, למשל thought_signature
+// של Gemini) "מוזן" בחזרה לספק אחר שלא יודע לפרש אותו ומחזיר 400.
+// אם הספק שהתחלנו ממנו נכשל בכל זאת, השרשרת ממשיכה קדימה (לא חוזרת אחורה).
+async function executeLLMPipeline(
+  messages: any[],
+  env: Env,
+  tools?: any[],
+  startProvider: LLMProvider = "gemini"
+): Promise<any> {
+  const startIndex = PROVIDER_ORDER.indexOf(startProvider);
+  const providersToTry = startIndex >= 0 ? PROVIDER_ORDER.slice(startIndex) : PROVIDER_ORDER;
+
+  let lastErr: any = null;
+
+  for (const provider of providersToTry) {
     try {
-      return await callNvidiaAPI(messages, env, tools);
-    } catch (err2) {
-      const msg2 = err2 instanceof Error ? err2.message : String(err2);
-      console.warn("Model 2 (NVIDIA NIM) failed, falling back to Model 3 (Cloudflare Workers AI Llama 3.3 70B):", msg2);
+      if (provider === "gemini") {
+        return await callGeminiAPI(messages, env, tools);
+      }
 
-      // 3. ניסיון 3 (גיבוי שני) - פנייה לקלאודפלר מול Llama 3.3 70B
+      if (provider === "nvidia") {
+        return await callNvidiaAPI(messages, env, tools);
+      }
+
+      // ספק אחרון בשרשרת - Cloudflare Workers AI (Llama 3.3 70B)
       const options: any = {
         messages: messages,
-        max_tokens: 512
+        max_tokens: 1024
       };
       if (tools) options.tools = tools;
 
       const cfRes = await env.AI.run("@cf/meta/llama-3.3-70b-instruct-fp8-fast", options);
       return {
         response: cfRes.response || "",
-        tool_calls: cfRes.tool_calls
+        tool_calls: cfRes.tool_calls,
+        provider: "workers-ai" as LLMProvider
       };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.warn(`Model (${provider}) failed, trying next provider in chain (if any):`, msg);
+      lastErr = err;
     }
   }
+
+  throw lastErr instanceof Error ? lastErr : new Error("All LLM providers in the pipeline failed.");
 }
 
 // 🥇 מודל 1: פנייה ישירה ל-Google Gemini API (gemini-3.5-flash-lite)
@@ -780,11 +806,17 @@ async function callGeminiAPI(messages: any[], env: Env, tools?: any[]): Promise<
   // כי ה-sampling כויל סביב תהליך ה-thinking). נוסף reasoning_effort ברמת "medium"
   // לשליטה בעומק/מהירות החשיבה במקום זה (ערכים אפשריים: minimal/low/medium/high,
   // תלוי בדגם הספציפי). לא ניתן לשלב reasoning_effort יחד עם thinking_level/thinking_budget.
+  // ⚠️ תיקון: reasoning_effort שונה מ-"medium" ל-"minimal" - gemini-3.5-flash-lite תומך
+  // בערך הזה (וזו אפילו ברירת המחדל הרשמית שלו לפי גוגל), כדי לצמצם את כמות טוקני
+  // החשיבה הפנימית שנצרכים מתוך אותו max_tokens, ולהשאיר יותר מקום לתשובה הגלויה.
+  // אזהרה מתיעוד גוגל: ברמת minimal יש סיכוי ל"סיום מוקדם" (premature tool termination)
+  // במשימות מרובות-שלבים עם כלים - כלומר סיכוי (קטן) שהמודל "יוותר" על קריאה ל-tavilySearch
+  // כשבאמת נדרש חיפוש. אם ייצפו החמצות של קריאות tool, כדאי לשקול חזרה ל-"low"/"medium".
   const bodyPayload: any = {
     model: "gemini-3.5-flash-lite",
     messages: formattedMessages,
-    reasoning_effort: "medium",
-    max_tokens: 512
+    reasoning_effort: "minimal",
+    max_tokens: 1536
   };
 
   if (tools) {
@@ -817,7 +849,8 @@ async function callGeminiAPI(messages: any[], env: Env, tools?: any[]): Promise<
     // tool_calls מוחזר כפי שהתקבל מהמודל, כולל extra_content.google.thought_signature אם קיים -
     // חשוב לשימור השדה הזה בהמשך השרשרת (ראו הערה בנקודת ההזנה חזרה ל-activeMessages).
     response: choice?.message?.content || "",
-    tool_calls: choice?.message?.tool_calls
+    tool_calls: choice?.message?.tool_calls,
+    provider: "gemini" as LLMProvider
   };
 }
 
@@ -837,12 +870,14 @@ async function callNvidiaAPI(messages: any[], env: Env, tools?: any[]): Promise<
     return msg;
   });
 
+  // ⚠️ תיקון: הועלה max_tokens מ-512 ל-1536 - Nemotron הוא גם מודל reasoning,
+  // וסובל מאותה בעיית קיטוע פלט תחת תקציב טוקנים קטן מדי כמו Gemini.
   const bodyPayload: any = {
     model: "nvidia/nemotron-3-super-120b-a12b",
     messages: formattedMessages,
     temperature: 1,
     top_p: 0.95,
-    max_tokens: 512
+    max_tokens: 1536
   };
 
   if (tools) {
@@ -873,7 +908,8 @@ async function callNvidiaAPI(messages: any[], env: Env, tools?: any[]): Promise<
 
   return {
     response: choice?.message?.content || "",
-    tool_calls: choice?.message?.tool_calls
+    tool_calls: choice?.message?.tool_calls,
+    provider: "nvidia" as LLMProvider
   };
 }
 
