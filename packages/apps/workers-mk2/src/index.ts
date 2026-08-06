@@ -551,14 +551,21 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env, ctx: Cloud
         const toolCallId = toolCall.id || "call_" + Date.now();
         const argsString = typeof args === "string" ? args : JSON.stringify(args || {});
 
-        const formattedToolCalls = [
+        // ⚠️ תיקון: שימור thought_signature של Gemini 3.x
+        // Gemini דורש לקבל בחזרה, בדיוק כפי שנשלח, את שדה extra_content.google.thought_signature
+        // שהוא עצמו צירף לקריאת הכלי (ראו: https://ai.google.dev/gemini-api/docs/thought-signatures).
+        // אם משמיטים את השדה הזה בבניית ה-tool_call מחדש, גוגל מחזירה 400
+        // "Function call is missing a thought_signature in functionCall parts".
+        // כאשר הקריאה המקורית לא הגיעה מ-Gemini, השדה פשוט לא קיים ולא נוסף - בטוח לשאר הספקים.
+        const formattedToolCalls: any[] = [
           {
             id: toolCallId,
             type: "function",
             function: {
               name: "tavilySearch",
               arguments: argsString
-            }
+            },
+            ...(toolCall.extra_content ? { extra_content: toolCall.extra_content } : {})
           }
         ];
 
@@ -585,8 +592,11 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env, ctx: Cloud
           });
         }
 
+        // ⚠️ תיקון: מעבירים את הגדרת ה-tools גם בסיבוב השני.
+        // חלק מהספקים (ובפרט ולידציה קפדנית) דוחים בקוד 400 היסטוריית שיחה שמכילה
+        // tool_calls/tool כאשר ה-tools schema לא הוצהר גם בבקשה הנוכחית.
         console.log("9. Calling LLM Pipeline Turn 2 (Final Answer)...");
-        const finalAiResponse = await executeLLMPipeline(activeMessages, env);
+        const finalAiResponse = await executeLLMPipeline(activeMessages, env, tools);
         finalAnswer = finalAiResponse.response || "לא התקבלה תשובה סופית.";
       }
     } else {
@@ -599,8 +609,12 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env, ctx: Cloud
     // שמירת התשובה המלאה לצורך היסטוריית השיחה
     messages.push({ role: "assistant", content: finalAnswer });
 
+    // ⚠️ תיקון: חיתוך היסטוריה בטוח - לא משאיר הודעת "tool" יתומה או "assistant" עם
+    // tool_calls בלי תוצאת ה-tool שאחריו בתחילת המערך שנשמר. כרגע ה-messages הנשמר
+    // תמיד user/assistant נקי (הודעות ה-tool נשארות רק ב-activeMessages הזמני), אבל
+    // ההגנה הזו נשארת כרשת ביטחון גם אם המבנה ישתנה בעתיד ולמניעת 400 עתידי.
     if (messages.length > 11) {
-      messages = [messages[0], ...messages.slice(-10)];
+      messages = trimHistorySafely(messages, 10);
     }
 
     await env.DATABASE.put(chatId, JSON.stringify(messages), { expirationTtl: 7200 });
@@ -625,7 +639,7 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env, ctx: Cloud
             body: JSON.stringify({
               input: cleanTextForTTS,
               voice: "he-IL-AvriNeural",
-              speed: 2.5
+              speed: 1.5 // ⚠️ תוקן מ-2.5 ל-1.5 לפי בקשה
             })
           });
 
@@ -761,10 +775,15 @@ async function callGeminiAPI(messages: any[], env: Env, tools?: any[]): Promise<
     return msg;
   });
 
+  // ⚠️ תיקון: הוסר temperature (Google ממליצה במפורש להשאיר את ברירת המחדל
+  // עבור מודלי Gemini 3.x עם thinking - הורדתה עלולה לגרום ל"לולאות" ותשובות מנוונות,
+  // כי ה-sampling כויל סביב תהליך ה-thinking). נוסף reasoning_effort ברמת "medium"
+  // לשליטה בעומק/מהירות החשיבה במקום זה (ערכים אפשריים: minimal/low/medium/high,
+  // תלוי בדגם הספציפי). לא ניתן לשלב reasoning_effort יחד עם thinking_level/thinking_budget.
   const bodyPayload: any = {
     model: "gemini-3.5-flash-lite",
     messages: formattedMessages,
-    temperature: 0.7,
+    reasoning_effort: "medium",
     max_tokens: 512
   };
 
@@ -795,6 +814,8 @@ async function callGeminiAPI(messages: any[], env: Env, tools?: any[]): Promise<
   console.log("Google Gemini (gemini-3.5-flash-lite) responded successfully!");
 
   return {
+    // tool_calls מוחזר כפי שהתקבל מהמודל, כולל extra_content.google.thought_signature אם קיים -
+    // חשוב לשימור השדה הזה בהמשך השרשרת (ראו הערה בנקודת ההזנה חזרה ל-activeMessages).
     response: choice?.message?.content || "",
     tool_calls: choice?.message?.tool_calls
   };
@@ -868,6 +889,40 @@ function stripMarkdownAndEmojis(text: string): string {
     .replace(/[\u{2600}-\u{26FF}]/gu, "")
     .replace(/[\r\n]+/g, " ")
     .trim();
+}
+
+// ⚠️ פונקציה חדשה: חיתוך היסטוריה "בטוח" שלא משאיר בתחילת המערך:
+// (א) הודעת role:"tool" יתומה בלי ה-assistant/tool_calls שמקדים אותה, או
+// (ב) הודעת assistant עם tool_calls בלי תוצאת ה-tool שאמורה לבוא מייד אחריה.
+// שתי התבניות האלה גורמות ל-400 אצל ספקים תואמי-OpenAI (הודעה "יתומה" בהיסטוריה).
+// כרגע ה-messages שנשמר ל-KV לא מכיל בכלל הודעות tool, אבל זו רשת ביטחון למקרה
+// שהמבנה ישתנה בעתיד (למשל אם יוחלט לשמר גם את שרשרת הכלים בהיסטוריה המתמשכת).
+function trimHistorySafely(messages: any[], maxNonSystem: number = 10): any[] {
+  if (messages.length === 0) return messages;
+
+  const hasSystem = messages[0]?.role === "system";
+  const systemMsg = hasSystem ? messages[0] : null;
+  const rest = hasSystem ? messages.slice(1) : messages;
+
+  let trimmed = rest.slice(-maxNonSystem);
+
+  // מסיר מהתחלה הודעת "tool" יתומה
+  while (trimmed.length > 0 && trimmed[0]?.role === "tool") {
+    trimmed = trimmed.slice(1);
+  }
+
+  // מסיר מהתחלה הודעת "assistant" עם tool_calls שאין אחריה מיד תוצאת "tool"
+  while (
+    trimmed.length > 0 &&
+    trimmed[0]?.role === "assistant" &&
+    Array.isArray(trimmed[0]?.tool_calls) &&
+    trimmed[0].tool_calls.length > 0 &&
+    trimmed[1]?.role !== "tool"
+  ) {
+    trimmed = trimmed.slice(1);
+  }
+
+  return systemMsg ? [systemMsg, ...trimmed] : trimmed;
 }
 
 function chunkText(text: string): string[] {
