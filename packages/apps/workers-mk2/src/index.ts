@@ -9,12 +9,14 @@ interface CloudflareExecutionContext {
   waitUntil(promise: Promise<any>): void;
 }
 
-// הגדרת משתני הסביבה כולל החיבורים הפנימיים לשלושת הוורקרים (TTS, STT ו-NEWS)
+// הגדרת משתני הסביבה כולל החיבורים הפנימיים לכל ששת הוורקרים
 interface Env {
   DATABASE: CloudflareKV;
   AI: any;
   TELEGRAM_BOT_TOKEN: string;
   TAVILY_API_KEY: string;
+  GEMINI_API_KEY?: string; // מפתח API ישיר של גוגל ג'מיני
+  NVIDIA_API_KEY?: string; // מפתח API של NVIDIA
   TTS_SERVICE?: {
     fetch(request: Request | string, init?: RequestInit): Promise<Response>;
   }; // חיבור פנימי לוורקר ה-TTS (ttss)
@@ -23,17 +25,16 @@ interface Env {
   }; // חיבור פנימי לוורקר ה-STT (sstt)
   NEWS_SERVICE?: {
     fetch(request: Request | string, init?: RequestInit): Promise<Response>;
-  }; // חיבור פנימי חדש לוורקר ה-News (news)
+  }; // חיבור פנימי לוורקר ה-News (news)
   ZMAN_SERVICE?: {
     fetch(request: Request | string, init?: RequestInit): Promise<Response>;
-  }; // חיבור פנימי חדש לוורקר ה-Zmanים (zman)
+  }; // חיבור פנימי לוורקר ה-Zmanים (zman)
   LNEWS_SERVICE?: {
     fetch(request: Request | string, init?: RequestInit): Promise<Response>;
-  }; // חיבור פנימי חדש לוורקר השידורים החיים (lnews)
+  }; // חיבור פנימי לוורקר השידורים החיים (lnews)
   MOVI_SERVICE?: {
     fetch(request: Request | string, init?: RequestInit): Promise<Response>;
-  }; // חיבור פנימי חדש לוורקר הסרטונים (movi)
-  NVIDIA_API_KEY?: string; // מפתח ה-API של NVIDIA שיוגדר כסיקרט מוצפן
+  }; // חיבור פנימי לוורקר הסרטונים (movi)
 }
 
 interface TelegramUpdate {
@@ -329,7 +330,7 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env, ctx: Cloud
         return;
       }
     } else if (message.voice) {
-      // ב. טיפול בקבלת הודעה קולית (STT) [1]
+      // ב. טיפול בקבלת הודעה קולית (STT)
       console.log("Voice note update received from Telegram!");
 
       const sttDisabled = await env.DATABASE.get("stt_disabled:" + chatId);
@@ -436,7 +437,6 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env, ctx: Cloud
         timeZone: "Asia/Jerusalem"
       });
 
-      // הגדרת מערכת חסינת הזיות/מונולוגים שמצווה מפורשות: "לא לחשוב כלל חשיבה מקדימה" [1]
       messages.push({
         role: "system",
         content: `שמך ששון (Sasson). אתה עוזר וירטואלי אישי לכבוד הרב, בעל יכולת חיפוש מידע ברשת. התאריך היום: ${formattedDate}. ` +
@@ -472,20 +472,11 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env, ctx: Cloud
     let activeMessages = [...messages];
     let aiResponse: any = null;
 
-    // פנייה ראשונה ל-AI (NVIDIA Nemotron 120B)
-    console.log("6. Calling NVIDIA NIM API (Nemotron 120B) - Turn 1...");
-    try {
-      aiResponse = await callNvidiaAPI(activeMessages, env, tools);
-    } catch (err) {
-      const errMsg = err instanceof Error ? err.message : String(err);
-      console.warn("NVIDIA NIM API Turn 1 failed, falling back to Workers AI (Llama 3.3 70B):", errMsg);
-
-      aiResponse = await env.AI.run("@cf/meta/llama-3.3-70b-instruct-fp8-fast", {
-        messages: activeMessages,
-        tools,
-        max_tokens: 512
-      });
-    }
+    // ---------------------------------------------------------------------
+    // פנייה ל-AI דרך מנגנון 3 מודלים מדורג (Gemini ➡️ NVIDIA ➡️ Workers AI)
+    // ---------------------------------------------------------------------
+    console.log("6. Calling LLM Pipeline Turn 1...");
+    aiResponse = await executeLLMPipeline(activeMessages, env, tools);
 
     console.log("AI First response output:", JSON.stringify(aiResponse));
 
@@ -594,20 +585,8 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env, ctx: Cloud
           });
         }
 
-        console.log("9. Calling Workers AI (Llama 3.3 70B) - Turn 2 (Final Answer)...");
-        let finalAiResponse: any = null;
-        try {
-          finalAiResponse = await callNvidiaAPI(activeMessages, env);
-        } catch (err) {
-          const errMsg = err instanceof Error ? err.message : String(err);
-          console.warn("NVIDIA NIM API Turn 2 failed, falling back to Workers AI (Llama 3.3 70B):", errMsg);
-
-          finalAiResponse = await env.AI.run("@cf/meta/llama-3.3-70b-instruct-fp8-fast", {
-            messages: activeMessages,
-            max_tokens: 512
-          });
-        }
-
+        console.log("9. Calling LLM Pipeline Turn 2 (Final Answer)...");
+        const finalAiResponse = await executeLLMPipeline(activeMessages, env);
         finalAnswer = finalAiResponse.response || "לא התקבלה תשובה סופית.";
       }
     } else {
@@ -637,11 +616,9 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env, ctx: Cloud
       console.log("12. Triggering TTS Worker via Service Binding...");
       ctx.waitUntil((async () => {
         try {
-          // ניקוי תווים מיוחדים ומארקדאון כדי להבטיח קריאה חלקה ונקייה ל-TTS
           const cleanTextForTTS = stripMarkdownAndEmojis(finalAnswer);
           console.log("Clean text prepared for TTS:", cleanTextForTTS);
 
-          // פנייה פנימית מול ה-Service Binding לקבלת קובץ השמע
           const ttsRes = await ttsService.fetch("http://ttss.local/v1/audio/speech", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -660,10 +637,8 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env, ctx: Cloud
             return;
           }
 
-          // קבלת ה-mp3 הבינארי מתשובת הוורקר
           const audioBuffer = await ttsRes.arrayBuffer();
 
-          // בניית multipart/form-data ושליחה בפועל לטלגרם דרך sendVoice
           const formData = new FormData();
           formData.append("chat_id", chatId);
           formData.append(
@@ -735,27 +710,112 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env, ctx: Cloud
   }
 }
 
-// פונקציית הקריאה הישירה ל-NVIDIA NIM API מול המודל הענק Nemotron 3 Super 120B
-async function callNvidiaAPI(messages: any[], env: Env, tools?: any[]): Promise<any> {
-  if (!env.NVIDIA_API_KEY) {
-    throw new Error("NVIDIA_API_KEY is missing in your environment variables. Cannot execute API call.");
+// ============================================================================
+// 🤖 מנגנון 3 מודלים מדורג (3-Tier LLM Fallback Pipeline)
+// ============================================================================
+
+async function executeLLMPipeline(messages: any[], env: Env, tools?: any[]): Promise<any> {
+  // 1. ניסיון 1 (ראשי) - פנייה ישירה לגוגל מול gemini-3.5-flash-lite
+  try {
+    return await callGeminiAPI(messages, env, tools);
+  } catch (err1) {
+    const msg1 = err1 instanceof Error ? err1.message : String(err1);
+    console.warn("Model 1 (Google Gemini gemini-3.5-flash-lite) failed, falling back to Model 2 (NVIDIA NIM):", msg1);
+
+    // 2. ניסיון 2 (גיבוי ראשון) - פנייה לנבידיה מול Nemotron 120B
+    try {
+      return await callNvidiaAPI(messages, env, tools);
+    } catch (err2) {
+      const msg2 = err2 instanceof Error ? err2.message : String(err2);
+      console.warn("Model 2 (NVIDIA NIM) failed, falling back to Model 3 (Cloudflare Workers AI Llama 3.3 70B):", msg2);
+
+      // 3. ניסיון 3 (גיבוי שני) - פנייה לקלאודפלר מול Llama 3.3 70B
+      const options: any = {
+        messages: messages,
+        max_tokens: 512
+      };
+      if (tools) options.tools = tools;
+
+      const cfRes = await env.AI.run("@cf/meta/llama-3.3-70b-instruct-fp8-fast", options);
+      return {
+        response: cfRes.response || "",
+        tool_calls: cfRes.tool_calls
+      };
+    }
+  }
+}
+
+// 🥇 מודל 1: פנייה ישירה ל-Google Gemini API (gemini-3.5-flash-lite)
+async function callGeminiAPI(messages: any[], env: Env, tools?: any[]): Promise<any> {
+  if (!env.GEMINI_API_KEY) {
+    throw new Error("GEMINI_API_KEY is missing in your environment variables. Cannot execute Google Gemini call.");
   }
 
-  const nvidiaUrl = "https://integrate.api.nvidia.com/v1/chat/completions";
+  const url = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions";
 
-  // נרמול ומיפוי היסטוריית השיחה בצורה מלאה התואמת ל-OpenAI (כולל תמיכה ב-tool_calls היסטוריים ובשדות id)
   const formattedMessages = messages.map(m => {
-    const msg: any = {
-      role: m.role,
-      content: m.content
-    };
+    const msg: any = { role: m.role, content: m.content };
     if (m.tool_calls) msg.tool_calls = m.tool_calls;
     if (m.tool_call_id) msg.tool_call_id = m.tool_call_id;
     if (m.name) msg.name = m.name;
     return msg;
   });
 
-  // בניית גוף הבקשה לנבידיה (עם הגבלת max_tokens: 512 לתגובות קצרות וחסכוניות)
+  const bodyPayload: any = {
+    model: "gemini-3.5-flash-lite",
+    messages: formattedMessages,
+    temperature: 0.7,
+    max_tokens: 512
+  };
+
+  if (tools) {
+    bodyPayload.tools = tools;
+  }
+
+  console.log("Calling Direct Google Gemini API (gemini-3.5-flash-lite)...");
+
+  const response = await fetch(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Authorization": "Bearer " + env.GEMINI_API_KEY
+    },
+    body: JSON.stringify(bodyPayload),
+    signal: AbortSignal.timeout(15000)
+  });
+
+  if (!response.ok) {
+    const errText = await response.text();
+    throw new Error("Google Gemini API returned status " + response.status + ". Details: " + errText);
+  }
+
+  const resJson = await response.json() as any;
+  const choice = resJson?.choices?.[0];
+
+  console.log("Google Gemini (gemini-3.5-flash-lite) responded successfully!");
+
+  return {
+    response: choice?.message?.content || "",
+    tool_calls: choice?.message?.tool_calls
+  };
+}
+
+// 🥈 מודל 2: פנייה ישירה ל-NVIDIA NIM API (Nemotron 120B)
+async function callNvidiaAPI(messages: any[], env: Env, tools?: any[]): Promise<any> {
+  if (!env.NVIDIA_API_KEY) {
+    throw new Error("NVIDIA_API_KEY is missing in your environment variables. Cannot execute NVIDIA API call.");
+  }
+
+  const nvidiaUrl = "https://integrate.api.nvidia.com/v1/chat/completions";
+
+  const formattedMessages = messages.map(m => {
+    const msg: any = { role: m.role, content: m.content };
+    if (m.tool_calls) msg.tool_calls = m.tool_calls;
+    if (m.tool_call_id) msg.tool_call_id = m.tool_call_id;
+    if (m.name) msg.name = m.name;
+    return msg;
+  });
+
   const bodyPayload: any = {
     model: "nvidia/nemotron-3-super-120b-a12b",
     messages: formattedMessages,
@@ -764,7 +824,6 @@ async function callNvidiaAPI(messages: any[], env: Env, tools?: any[]): Promise<
     max_tokens: 512
   };
 
-  // במידה והועברו כלים (בסבב הראשון), נצרף אותם לבקשה של נבידיה
   if (tools) {
     bodyPayload.tools = tools;
   }
@@ -788,25 +847,26 @@ async function callNvidiaAPI(messages: any[], env: Env, tools?: any[]): Promise<
 
   const resJson = await response.json() as any;
   const choice = resJson?.choices?.[0];
-  const textAnswer = choice?.message?.content || "";
-  const toolCalls = choice?.message?.tool_calls;
 
   console.log("NVIDIA 120B responded successfully!");
 
   return {
-    response: textAnswer,
-    tool_calls: toolCalls
+    response: choice?.message?.content || "",
+    tool_calls: choice?.message?.tool_calls
   };
 }
 
-// פונקציית עזר להסרת תווי מארקדאון ואימוג'ים לקבלת קריאה נקייה וחלקה ב-TTS
+// ============================================================================
+// 🛠️ פונקציות עזר וטקסט
+// ============================================================================
+
 function stripMarkdownAndEmojis(text: string): string {
   return text
-    .replace(/[*_`#~[\]()]/g, "") // הסרת תווי מארקדאון
-    .replace(/[\u{1F300}-\u{1F9FF}]/gu, "") // הסרת אימוג'ים מכל הסוגים
+    .replace(/[*_`#~[\]()]/g, "")
+    .replace(/[\u{1F300}-\u{1F9FF}]/gu, "")
     .replace(/[\u{2700}-\u{27BF}]/gu, "")
     .replace(/[\u{2600}-\u{26FF}]/gu, "")
-    .replace(/[\r\n]+/g, " ") // החלפת ירידות שורה ברווחים כדי להקל על רציפות ההקראה
+    .replace(/[\r\n]+/g, " ")
     .trim();
 }
 
