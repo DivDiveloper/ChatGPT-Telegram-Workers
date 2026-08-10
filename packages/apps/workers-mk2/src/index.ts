@@ -364,7 +364,7 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env, ctx: Cloud
       }
 
       const fileId = message.voice.file_id;
-      const fileInfoRes = await fetch("https://api.telegram.org/file/bot" + env.TELEGRAM_BOT_TOKEN + "/getFile?file_id=" + fileId);
+      const getFileUrl = "https://api.telegram.org/bot" + env.TELEGRAM_BOT_TOKEN + "/getFile?file_id=" + encodeURIComponent(fileId);
       const fileInfo = await fileInfoRes.json() as { ok: boolean, result?: { file_path?: string } };
 
       if (!fileInfo.ok || !fileInfo.result?.file_path) {
