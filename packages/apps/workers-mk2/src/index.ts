@@ -56,6 +56,14 @@ interface TavilyResult {
   content: string;
 }
 
+interface TelegramGetFileResult {
+  ok: boolean;
+  result?: {
+    file_path?: string;
+  };
+  description?: string;
+}
+
 export default {
   async fetch(request: Request, env: Env, ctx: CloudflareExecutionContext): Promise<Response> {
     if (request.method !== "POST") {
@@ -64,10 +72,10 @@ export default {
 
     try {
       const update = await request.json() as TelegramUpdate;
-      
+
       // הרצת עיבוד ההודעה ברקע - העברת ה-ctx כפרמטר
       ctx.waitUntil(handleTelegramUpdate(update, env, ctx));
-      
+
       return new Response(JSON.stringify({ ok: true }), {
         status: 200,
         headers: { "Content-Type": "application/json" }
@@ -91,7 +99,7 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env, ctx: Cloud
       console.log("Aborting: Update does not contain a message object.");
       return;
     }
-    
+
     // בדיקה האם ההודעה מכילה טקסט או הודעה קולית (עבור STT)
     if (!message.text && !message.voice) {
       console.log("Aborting: Message contains neither text nor voice.");
@@ -201,7 +209,7 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env, ctx: Cloud
       // ד. טיפול בפקודת חדשות (/news)
       if (userText === "/news") {
         console.log("Command received: triggering news-agent");
-        
+
         if (!env.NEWS_SERVICE) {
           if (tempMsgId) {
             await sendTelegram(env, "editMessageText", {
@@ -234,7 +242,7 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env, ctx: Cloud
       // ה. טיפול בפקודת זמנים ומזג אוויר (/zman)
       if (userText === "/zman") {
         console.log("Command received: triggering zman-agent");
-        
+
         if (!env.ZMAN_SERVICE) {
           if (tempMsgId) {
             await sendTelegram(env, "editMessageText", {
@@ -267,7 +275,7 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env, ctx: Cloud
       // ו. טיפול בפקודת שידורים חיים (/lnews)
       if (userText === "/lnews") {
         console.log("Command received: triggering lnews-agent");
-        
+
         if (!env.LNEWS_SERVICE) {
           if (tempMsgId) {
             await sendTelegram(env, "editMessageText", {
@@ -300,7 +308,7 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env, ctx: Cloud
       // ז. טיפול בפקודת סרטון יוטיוב (/movi)
       if (userText === "/movi") {
         console.log("Command received: triggering movi-agent");
-        
+
         if (!env.MOVI_SERVICE) {
           if (tempMsgId) {
             await sendTelegram(env, "editMessageText", {
@@ -365,16 +373,36 @@ async function handleTelegramUpdate(update: TelegramUpdate, env: Env, ctx: Cloud
 
       const fileId = message.voice.file_id;
       const getFileUrl = "https://api.telegram.org/bot" + env.TELEGRAM_BOT_TOKEN + "/getFile?file_id=" + encodeURIComponent(fileId);
-      const fileInfo = await fileInfoRes.json() as { ok: boolean, result?: { file_path?: string } };
+
+      // ⚠️ תוקן: הייתה חסרה כליל הקריאה עם fetch ל-getFileUrl - היה מנסה
+      // לקרוא ל-.json() על משתנה (fileInfoRes) שמעולם לא הוגדר, מה שגרם
+      // לכשלון קומפילציה (build) ובכל מקרה היה נכשל גם בזמן ריצה.
+      const fileInfoRes = await fetch(getFileUrl, {
+        signal: AbortSignal.timeout(15000)
+      });
+
+      if (!fileInfoRes.ok) {
+        throw new Error("Telegram getFile API returned status " + fileInfoRes.status);
+      }
+
+      const fileInfo = await fileInfoRes.json() as TelegramGetFileResult;
 
       if (!fileInfo.ok || !fileInfo.result?.file_path) {
-        throw new Error("Failed to retrieve voice file path from Telegram.");
+        throw new Error("Failed to retrieve voice file path from Telegram. " + (fileInfo.description || ""));
       }
 
       const filePath = fileInfo.result.file_path;
-      const voiceFileRes = await fetch("https://api.telegram.org/bot" + env.TELEGRAM_BOT_TOKEN + "/" + filePath);
+
+      // ⚠️ תוקן: כתובת ההורדה של קבצים מטלגרם חייבת לכלול את הנתיב "/file/"
+      // (https://api.telegram.org/file/bot<TOKEN>/<file_path>). הכתובת המקורית
+      // הייתה חסרה את "/file/" ולכן הייתה מחזירה 404 גם אחרי תיקון הבאג הקודם.
+      const voiceFileRes = await fetch(
+        "https://api.telegram.org/file/bot" + env.TELEGRAM_BOT_TOKEN + "/" + filePath,
+        { signal: AbortSignal.timeout(15000) }
+      );
+
       if (!voiceFileRes.ok) {
-        throw new Error("Failed to download voice file from Telegram.");
+        throw new Error("Failed to download voice file from Telegram. Status: " + voiceFileRes.status);
       }
 
       const audioBuffer = await voiceFileRes.arrayBuffer();
@@ -803,13 +831,9 @@ async function callGeminiAPI(messages: any[], env: Env, tools?: any[]): Promise<
 
   // ⚠️ תיקון: הוסר temperature (Google ממליצה במפורש להשאיר את ברירת המחדל
   // עבור מודלי Gemini 3.x עם thinking - הורדתה עלולה לגרום ל"לולאות" ותשובות מנוונות,
-  // כי ה-sampling כויל סביב תהליך ה-thinking). נוסף reasoning_effort ברמת "medium"
+  // כי ה-sampling כויל סביב תהליך ה-thinking). נוסף reasoning_effort ברמת "low"
   // לשליטה בעומק/מהירות החשיבה במקום זה (ערכים אפשריים: minimal/low/medium/high,
   // תלוי בדגם הספציפי). לא ניתן לשלב reasoning_effort יחד עם thinking_level/thinking_budget.
-  // ⚠️ תיקון: reasoning_effort הועלה מ-"minimal" ל-"low" - מתן קצת יותר "מרווח חשיבה"
-  // מ-minimal (שהוא ברירת המחדל של gemini-3.5-flash-lite), כדי לצמצם את הסיכון
-  // ל"סיום מוקדם" (premature tool termination) שגוגל מזהירה ממנו ב-minimal, תוך עדיין
-  // שמירה על צריכת טוקנים נמוכה יחסית ל-medium/high.
   const bodyPayload: any = {
     model: "gemini-3.5-flash-lite",
     messages: formattedMessages,
