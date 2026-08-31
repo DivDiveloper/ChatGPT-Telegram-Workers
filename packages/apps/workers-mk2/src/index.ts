@@ -32,6 +32,7 @@ interface LocalFetcher {
 
 export interface Env {
   CHAT_SESSION: LocalDONamespace;
+  DATABASE: any;
   AI: any;
   TELEGRAM_BOT_TOKEN: string;
   TELEGRAM_SECRET_TOKEN?: string;
@@ -148,12 +149,11 @@ export default {
     }
 
     try {
-      // הפניה ל-Durable Object דרך קריאת fetch סטנדרטית
       const doId = env.CHAT_SESSION.idFromName(chatId.toString());
       const stub = env.CHAT_SESSION.get(doId);
 
       ctx.waitUntil(
-        stub.fetch("https://do/handle-update", {
+        stub.fetch("http://do/", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(update)
@@ -178,10 +178,10 @@ export default {
 };
 
 // ============================================================================
-// 3. מחלקת ה-Durable Object
+// 3. מחלקת ה-Durable Object הייעודית (ChatbotSessionDO)
 // ============================================================================
 
-export class ChatSessionDO {
+export class ChatbotSessionDO {
   private state: LocalDOState;
   private env: Env;
   private queue: Promise<void> = Promise.resolve();
@@ -191,21 +191,18 @@ export class ChatSessionDO {
     this.env = env;
   }
 
-  /**
-   * נקודת הכניסה הסטנדרטית של ה-Durable Object
-   */
   async fetch(request: Request): Promise<Response> {
     try {
       const update = (await request.json()) as TelegramUpdate;
       
-      // הכנסה לתור סדרתי למניעת התנגשויות
-      this.queue = this.queue
-        .then(() => this.processTelegramUpdate(update))
-        .catch((err) => {
-          console.error("Unhandled error in DO task execution:", err);
-        });
+      this.state.waitUntil(
+        this.queue = this.queue
+          .then(() => this.processTelegramUpdate(update))
+          .catch((err) => {
+            console.error("Unhandled error in DO task execution:", err);
+          })
+      );
 
-      await this.queue;
       return new Response(JSON.stringify({ ok: true }), {
         status: 200,
         headers: { "Content-Type": "application/json" }
@@ -224,15 +221,8 @@ export class ChatSessionDO {
 
     try {
       const message = update.message;
-      if (!message) {
-        console.log("Aborting: Update does not contain a message object.");
-        return;
-      }
-
-      if (!message.text && !message.voice) {
-        console.log("Aborting: Message contains neither text nor voice.");
-        return;
-      }
+      if (!message) return;
+      if (!message.text && !message.voice) return;
 
       chatId = message.chat.id.toString();
       let userText = "";
@@ -248,18 +238,16 @@ export class ChatSessionDO {
       });
 
       if (!thinkingMsg || !thinkingMsg.ok) {
-        throw new Error("Failed to send initial message to Telegram: " + (thinkingMsg?.description || "Unknown error"));
+        throw new Error("Failed to send initial message: " + (thinkingMsg?.description || ""));
       }
 
       tempMsgId = thinkingMsg.result?.message_id;
-      console.log("4. Initial message sent successfully. Message ID:", tempMsgId);
 
-      // א. פקודות טקסט ישירות
+      // א. פקודות טקסט
       if (message.text) {
         userText = message.text.trim();
 
         if (userText === "/clear" || userText === "/reset" || userText === "מחק היסטוריה") {
-          console.log("Command received: deleting history");
           await this.state.storage.delete("history");
           if (tempMsgId) {
             await this.sendTelegram("editMessageText", {
@@ -272,7 +260,6 @@ export class ChatSessionDO {
         }
 
         if (userText === "/voff") {
-          console.log("Command received: disabling voice output");
           await this.state.storage.put("voice_disabled", true);
           if (tempMsgId) {
             await this.sendTelegram("editMessageText", {
@@ -285,7 +272,6 @@ export class ChatSessionDO {
         }
 
         if (userText === "/von") {
-          console.log("Command received: enabling voice output");
           await this.state.storage.delete("voice_disabled");
           if (tempMsgId) {
             await this.sendTelegram("editMessageText", {
@@ -298,7 +284,6 @@ export class ChatSessionDO {
         }
 
         if (userText === "/soff") {
-          console.log("Command received: disabling voice input");
           await this.state.storage.put("stt_disabled", true);
           if (tempMsgId) {
             await this.sendTelegram("editMessageText", {
@@ -311,7 +296,6 @@ export class ChatSessionDO {
         }
 
         if (userText === "/son") {
-          console.log("Command received: enabling voice input");
           await this.state.storage.delete("stt_disabled");
           if (tempMsgId) {
             await this.sendTelegram("editMessageText", {
@@ -324,13 +308,12 @@ export class ChatSessionDO {
         }
 
         if (userText === "/news") {
-          console.log("Command received: triggering news-agent");
           if (!this.env.NEWS_SERVICE) {
             if (tempMsgId) {
               await this.sendTelegram("editMessageText", {
                 chat_id: chatId,
                 message_id: tempMsgId,
-                text: "⚠️ ששון לא יכול למשוך חדשות: לא הוגדר חיבור שירות עבור NEWS_SERVICE."
+                text: "⚠️ לא הוגדר חיבור עבור NEWS_SERVICE."
               });
             }
             return;
@@ -349,19 +332,18 @@ export class ChatSessionDO {
               method: "POST",
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify({ chatId: chatId })
-            }).catch((err) => console.error("Failed to trigger News Service:", err))
+            }).catch((err) => console.error("Failed News Service:", err))
           );
           return;
         }
 
         if (userText === "/zman") {
-          console.log("Command received: triggering zman-agent");
           if (!this.env.ZMAN_SERVICE) {
             if (tempMsgId) {
               await this.sendTelegram("editMessageText", {
                 chat_id: chatId,
                 message_id: tempMsgId,
-                text: "⚠️ ששון לא יכול למשוך זמנים: לא הוגדר חיבור שירות עבור ZMAN_SERVICE."
+                text: "⚠️ לא הוגדר חיבור עבור ZMAN_SERVICE."
               });
             }
             return;
@@ -380,19 +362,18 @@ export class ChatSessionDO {
               method: "POST",
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify({ chatId: chatId, tempMsgId: tempMsgId })
-            }).catch((err) => console.error("Failed to trigger Zman Service:", err))
+            }).catch((err) => console.error("Failed Zman Service:", err))
           );
           return;
         }
 
         if (userText === "/lnews") {
-          console.log("Command received: triggering lnews-agent");
           if (!this.env.LNEWS_SERVICE) {
             if (tempMsgId) {
               await this.sendTelegram("editMessageText", {
                 chat_id: chatId,
                 message_id: tempMsgId,
-                text: "⚠️ ששון לא יכול לבדוק שידור חי: לא הוגדר חיבור שירות עבור LNEWS_SERVICE."
+                text: "⚠️ לא הוגדר חיבור עבור LNEWS_SERVICE."
               });
             }
             return;
@@ -411,19 +392,18 @@ export class ChatSessionDO {
               method: "POST",
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify({ chatId: chatId, tempMsgId: tempMsgId })
-            }).catch((err) => console.error("Failed to trigger Lnews Service:", err))
+            }).catch((err) => console.error("Failed Lnews Service:", err))
           );
           return;
         }
 
         if (userText === "/movi") {
-          console.log("Command received: triggering movi-agent");
           if (!this.env.MOVI_SERVICE) {
             if (tempMsgId) {
               await this.sendTelegram("editMessageText", {
                 chat_id: chatId,
                 message_id: tempMsgId,
-                text: "⚠️ ששון לא יכול למשוך סרטון: לא הוגדר חיבור שירות עבור MOVI_SERVICE."
+                text: "⚠️ לא הוגדר חיבור עבור MOVI_SERVICE."
               });
             }
             return;
@@ -433,7 +413,7 @@ export class ChatSessionDO {
             await this.sendTelegram("editMessageText", {
               chat_id: chatId,
               message_id: tempMsgId,
-              text: "🎬 ששון מחפש ומסנן את הסרטון החדש מ-24 השעות האחרונות עבור כבוד הרב..."
+              text: "🎬 ששון מחפש את הסרטון החדש מ-24 השעות האחרונות עבור כבוד הרב..."
             });
           }
 
@@ -442,35 +422,28 @@ export class ChatSessionDO {
               method: "POST",
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify({ chatId: chatId, tempMsgId: tempMsgId })
-            }).catch((err) => console.error("Failed to trigger Movi Service:", err))
+            }).catch((err) => console.error("Failed Movi Service:", err))
           );
           return;
         }
       } else if (message.voice) {
-        // ב. זיהוי קולי (STT)
-        console.log("Voice note update received from Telegram!");
-
+        // ב. קלט קולי (STT)
         const sttDisabled = await this.state.storage.get<boolean>("stt_disabled");
         if (sttDisabled) {
           if (tempMsgId) {
             await this.sendTelegram("editMessageText", {
               chat_id: chatId,
               message_id: tempMsgId,
-              text: "🔇 כבוד הרב שלח הודעה קולית, אך שירות הזיהוי הקולי (STT) כבוי כעת. ניתן להפעילו באמצעות הפקודה /son."
+              text: "🔇 שירות הזיהוי הקולי כבוי כעת. ניתן להפעילו עם /son."
             });
           }
           return;
         }
 
         const sttService = this.env.STT_SERVICE;
-        if (!sttService) {
-          throw new Error("STT_SERVICE binding is missing in Environment.");
-        }
+        if (!sttService) throw new Error("STT_SERVICE binding missing.");
 
-        await this.sendTelegram("sendChatAction", {
-          chat_id: chatId,
-          action: "record_voice"
-        });
+        await this.sendTelegram("sendChatAction", { chat_id: chatId, action: "record_voice" });
 
         if (tempMsgId) {
           await this.sendTelegram("editMessageText", {
@@ -482,15 +455,11 @@ export class ChatSessionDO {
 
         const fileId = message.voice.file_id;
         const getFileUrl = `https://api.telegram.org/bot${this.env.TELEGRAM_BOT_TOKEN}/getFile?file_id=${encodeURIComponent(fileId)}`;
-
         const fileInfoRes = await fetch(getFileUrl, { signal: AbortSignal.timeout(15000) });
-        if (!fileInfoRes.ok) {
-          throw new Error("Telegram getFile API returned status " + fileInfoRes.status);
-        }
-
         const fileInfo = (await fileInfoRes.json()) as TelegramGetFileResult;
+
         if (!fileInfo.ok || !fileInfo.result?.file_path) {
-          throw new Error("Failed to retrieve voice file path from Telegram. " + (fileInfo.description || ""));
+          throw new Error("Failed to get voice file path from Telegram.");
         }
 
         const filePath = fileInfo.result.file_path;
@@ -499,46 +468,31 @@ export class ChatSessionDO {
           { signal: AbortSignal.timeout(15000) }
         );
 
-        if (!voiceFileRes.ok) {
-          throw new Error("Failed to download voice file from Telegram. Status: " + voiceFileRes.status);
-        }
-
         const audioBuffer = await voiceFileRes.arrayBuffer();
-
-        console.log("Sending audio bytes to SSTT Service...");
         const ssttRes = await sttService.fetch("http://sstt.local/", {
           method: "POST",
           headers: { "Content-Type": "application/octet-stream" },
           body: audioBuffer
         });
 
-        if (!ssttRes.ok) {
-          const errDetails = await ssttRes.text();
-          throw new Error("SSTT Service error: " + errDetails);
-        }
-
         const ssttData = (await ssttRes.json()) as { text?: string };
         userText = ssttData.text?.trim() || "";
-        console.log("Successfully transcribed text from SSTT:", userText);
 
         if (!userText) {
           if (tempMsgId) {
             await this.sendTelegram("editMessageText", {
               chat_id: chatId,
               message_id: tempMsgId,
-              text: "⚠️ ששון לא הצלחתי להבין מילים ברורות בהודעה הקולית. אנא נסה שנית או כתוב בטקסט."
+              text: "⚠️ לא הצלחתי לפענח מילים ברורות בהודעה הקולית."
             });
           }
           return;
         }
       }
 
-      if (!this.env.TAVILY_API_KEY) {
-        throw new Error("TAVILY_API_KEY is missing in environment variables");
-      }
+      if (!this.env.TAVILY_API_KEY) throw new Error("TAVILY_API_KEY is missing.");
 
       // ג. היסטוריה מ-DO Storage
-      console.log("5. Reading chat history from DO Storage...");
       let messages: any[] = (await this.state.storage.get<any[]>("history")) || [];
 
       if (messages.length === 0) {
@@ -585,18 +539,13 @@ export class ChatSessionDO {
       ];
 
       const activeMessages = [...messages];
-
-      // ד. מנגנון 3 מודלים מדורג
-      console.log("6. Calling LLM Pipeline Turn 1...");
       const aiResponse = await this.executeLLMPipeline(activeMessages, tools);
-      console.log("AI First response output:", JSON.stringify(aiResponse));
 
       let finalAnswer = "";
 
       if (aiResponse.tool_calls && aiResponse.tool_calls.length > 0) {
         const toolCall = aiResponse.tool_calls[0];
         const functionName = toolCall.function?.name || toolCall.name;
-        console.log("AI requested tool call: " + functionName);
 
         if (functionName === "tavilySearch") {
           const args = toolCall.function?.arguments || toolCall.arguments;
@@ -613,7 +562,6 @@ export class ChatSessionDO {
           }
 
           searchQuery = searchQuery ? searchQuery.trim() : userText;
-          console.log("7. Final search query extracted: " + searchQuery);
 
           if (tempMsgId) {
             await this.sendTelegram("editMessageText", {
@@ -623,7 +571,6 @@ export class ChatSessionDO {
             });
           }
 
-          console.log("8. Performing Tavily Search API call...");
           let searchResultsStr = "";
           try {
             const tavilyRes = await fetch("https://api.tavily.com/search", {
@@ -646,11 +593,9 @@ export class ChatSessionDO {
                 .map((r: TavilyResult) => "Title: " + r.title + "\nURL: " + r.url + "\nContent: " + r.content)
                 .join("\n\n");
             } else {
-              throw new Error("Tavily returned status " + tavilyRes.status);
+              throw new Error("Tavily returned " + tavilyRes.status);
             }
           } catch (err) {
-            const errMsg = err instanceof Error ? err.message : String(err);
-            console.error("Tavily Search call failed: " + errMsg);
             searchResultsStr = "שגיאת חיפוש: החיפוש ברשת נכשל. אנא השב על בסיס הידע הקיים שלך.";
           }
 
@@ -690,7 +635,6 @@ export class ChatSessionDO {
             });
           }
 
-          console.log("9. Calling LLM Pipeline Turn 2...");
           const finalAiResponse = await this.executeLLMPipeline(
             activeMessages,
             tools,
@@ -702,22 +646,18 @@ export class ChatSessionDO {
         finalAnswer = aiResponse.response || "לא הצלחתי לעבד את הפנייה.";
       }
 
-      console.log("10. Final Answer calculated: " + finalAnswer);
-
       messages.push({ role: "assistant", content: finalAnswer });
       if (messages.length > 11) {
         messages = this.trimHistorySafely(messages, 10);
       }
 
       await this.state.storage.put("history", messages);
-      console.log("11. Conversation history updated in DO storage.");
 
       // ה. פלט קולי (TTS)
       const voiceDisabled = await this.state.storage.get<boolean>("voice_disabled");
       const ttsService = this.env.TTS_SERVICE;
 
       if (ttsService && !voiceDisabled) {
-        console.log("12. Triggering TTS Worker via Service Binding...");
         this.state.waitUntil(
           (async () => {
             try {
@@ -745,7 +685,7 @@ export class ChatSessionDO {
                 signal: AbortSignal.timeout(20000)
               });
             } catch (ttsErr) {
-              console.error("Failed to trigger TTS Worker:", ttsErr);
+              console.error("Failed TTS Worker:", ttsErr);
             }
           })()
         );
@@ -753,7 +693,6 @@ export class ChatSessionDO {
 
       // ו. שידור מדורג
       if (tempMsgId) {
-        console.log("13. Streaming chunks to Telegram...");
         const chunks = this.chunkText(finalAnswer);
 
         if (chunks.length > 0) {
@@ -770,8 +709,6 @@ export class ChatSessionDO {
           }
         }
       }
-
-      console.log("14. Flow completed successfully.");
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);
       console.error("CRITICAL DO Error: " + errMsg);
@@ -823,8 +760,6 @@ export class ChatSessionDO {
           provider: "workers-ai" as LLMProvider
         };
       } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        console.warn(`Model (${provider}) failed, trying next:`, msg);
         lastErr = err;
       }
     }
