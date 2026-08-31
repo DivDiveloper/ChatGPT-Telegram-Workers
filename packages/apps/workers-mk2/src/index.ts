@@ -1,4 +1,3 @@
-//
 
 interface LocalDOStorage {
   get<T = any>(key: string): Promise<T | undefined>;
