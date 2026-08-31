@@ -1,11 +1,9 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "chatbot", // 👈 עודכן בדיוק לשם הוורקר הקיים שלך בקלאודפלר
-  "main": "src/index.ts",
+  "name": "chatbot",
+  "main": "dist/index.js",
   "compatibility_date": "2026-08-01",
   "compatibility_flags": ["nodejs_compat"],
-
-  // 1. הגדרת ה-Durable Object עבור מוח הבוט
   "durable_objects": {
     "bindings": [
       {
@@ -14,21 +12,15 @@
       }
     ]
   },
-
-  // 2. רישום המחלקה של ה-Durable Object ב-Cloudflare
   "migrations": [
     {
       "tag": "v1",
       "new_classes": ["ChatSessionDO"]
     }
   ],
-
-  // 3. חיבור ל-Workers AI (עבור Llama)
   "ai": {
     "binding": "AI"
   },
-
-  // 4. חיבורי ה-Service Bindings לשאר ששת הוורקרים שלך
   "services": [
     { "binding": "TTS_SERVICE", "service": "ttss" },
     { "binding": "STT_SERVICE", "service": "sstt" },
@@ -37,8 +29,6 @@
     { "binding": "LNEWS_SERVICE", "service": "lnews" },
     { "binding": "MOVI_SERVICE", "service": "movi" }
   ],
-
-  // 5. ניטור ולוגים
   "observability": {
     "enabled": true
   }
