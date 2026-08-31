@@ -1,11 +1,12 @@
 {
-    "extends": "../../../tsconfig.json",
-    "compilerOptions": {
-        "rootDir": "./src",
-        "outDir": "./dist"
-    },
-    "references": [
-        { "path": "../../lib/core" }
-    ],
-    "include": ["src/**/*"]
+  "compilerOptions": {
+    "target": "ESNext",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "types": ["@cloudflare/workers-types"],
+    "strict": true,
+    "skipLibCheck": true,
+    "noEmit": true
+  },
+  "include": ["src/**/*"]
 }
