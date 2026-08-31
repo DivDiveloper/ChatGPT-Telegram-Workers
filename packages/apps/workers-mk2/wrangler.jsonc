@@ -1,0 +1,35 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "sasson-telegram-bot",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "CHAT_SESSION",
+        "class_name": "ChatSessionDO"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_classes": ["ChatSessionDO"]
+    }
+  ],
+  "ai": {
+    "binding": "AI"
+  },
+  "services": [
+    { "binding": "TTS_SERVICE", "service": "ttss" },
+    { "binding": "STT_SERVICE", "service": "sstt" },
+    { "binding": "NEWS_SERVICE", "service": "news" },
+    { "binding": "ZMAN_SERVICE", "service": "zman" },
+    { "binding": "LNEWS_SERVICE", "service": "lnews" },
+    { "binding": "MOVI_SERVICE", "service": "movi" }
+  ],
+  "observability": {
+    "enabled": true
+  }
+}
