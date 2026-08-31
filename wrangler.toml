@@ -8,7 +8,7 @@ compatibility_flags = ["nodejs_compat_v2"]
 main = "packages/apps/workers-mk2/dist/index.js"
 
 # -----------------------------------------------------------------------------
-# 🧠 הגדרת מרחב ה-Durable Object הייעודי לבוט (חדש ומבודד)
+# 🧠 הגדרת מרחב ה-Durable Object הייעודי לבוט (SQLite Free Tier)
 # -----------------------------------------------------------------------------
 [[durable_objects.bindings]]
 name = "CHAT_SESSION"
@@ -16,10 +16,10 @@ class_name = "ChatbotSessionDO"
 
 [[migrations]]
 tag = "v1"
-new_classes = ["ChatbotSessionDO"]
+new_sqlite_classes = ["ChatbotSessionDO"]
 
 # -----------------------------------------------------------------------------
-# 🤖 משתנים וחיבורים קיימים שנשמרו במלואם
+# 🤖 משתנים וחיבורים קיימים
 # -----------------------------------------------------------------------------
 [vars]
 # TELEGRAM_AVAILABLE_TOKENS = 'token1,token2'
