@@ -1,3 +1,6 @@
+// ============================================================================
+// 1. ממשקים מקומיים (ללא תלות בספריות חיצוניות)
+// ============================================================================
 
 interface LocalDOStorage {
   get<T = any>(key: string): Promise<T | undefined>;
@@ -10,9 +13,13 @@ interface LocalDOState {
   waitUntil(promise: Promise<any>): void;
 }
 
+interface LocalDOStub {
+  fetch(request: Request | string, init?: RequestInit): Promise<Response>;
+}
+
 interface LocalDONamespace {
   idFromName(name: string): any;
-  get(id: any): any;
+  get(id: any): LocalDOStub;
 }
 
 interface LocalExecutionContext {
@@ -93,6 +100,10 @@ export interface TelegramGetFileResult {
 export type LLMProvider = "gemini" | "nvidia" | "workers-ai";
 const PROVIDER_ORDER: LLMProvider[] = ["gemini", "nvidia", "workers-ai"];
 
+// ============================================================================
+// 2. ה-Worker הדק (Router)
+// ============================================================================
+
 export default {
   async fetch(request: Request, env: Env, ctx: LocalExecutionContext): Promise<Response> {
     if (request.method !== "POST") {
@@ -137,12 +148,22 @@ export default {
     }
 
     try {
+      // הפניה ל-Durable Object דרך קריאת fetch סטנדרטית
       const doId = env.CHAT_SESSION.idFromName(chatId.toString());
       const stub = env.CHAT_SESSION.get(doId);
 
       ctx.waitUntil(
-        stub.handleUpdate(update).catch((err: any) => {
-          console.error(`Error in DO execution for chat ${chatId}:`, err);
+        stub.fetch("https://do/handle-update", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(update)
+        }).then(async (res) => {
+          if (!res.ok) {
+            const errText = await res.text();
+            console.error(`DO returned error status ${res.status}:`, errText);
+          }
+        }).catch((err) => {
+          console.error(`Failed to reach DO for chat ${chatId}:`, err);
         })
       );
     } catch (err) {
@@ -156,6 +177,10 @@ export default {
   }
 };
 
+// ============================================================================
+// 3. מחלקת ה-Durable Object
+// ============================================================================
+
 export class ChatSessionDO {
   private state: LocalDOState;
   private env: Env;
@@ -166,13 +191,29 @@ export class ChatSessionDO {
     this.env = env;
   }
 
-  async handleUpdate(update: TelegramUpdate): Promise<void> {
-    this.queue = this.queue
-      .then(() => this.processTelegramUpdate(update))
-      .catch((err) => {
-        console.error("Unhandled error in DO task execution:", err);
+  /**
+   * נקודת הכניסה הסטנדרטית של ה-Durable Object
+   */
+  async fetch(request: Request): Promise<Response> {
+    try {
+      const update = (await request.json()) as TelegramUpdate;
+      
+      // הכנסה לתור סדרתי למניעת התנגשויות
+      this.queue = this.queue
+        .then(() => this.processTelegramUpdate(update))
+        .catch((err) => {
+          console.error("Unhandled error in DO task execution:", err);
+        });
+
+      await this.queue;
+      return new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" }
       });
-    return this.queue;
+    } catch (err: any) {
+      console.error("Error in DO fetch handler:", err);
+      return new Response(err?.message || "Internal DO Error", { status: 500 });
+    }
   }
 
   private async processTelegramUpdate(update: TelegramUpdate): Promise<void> {
@@ -207,12 +248,13 @@ export class ChatSessionDO {
       });
 
       if (!thinkingMsg || !thinkingMsg.ok) {
-        throw new Error("Failed to send initial message to Telegram.");
+        throw new Error("Failed to send initial message to Telegram: " + (thinkingMsg?.description || "Unknown error"));
       }
 
       tempMsgId = thinkingMsg.result?.message_id;
       console.log("4. Initial message sent successfully. Message ID:", tempMsgId);
 
+      // א. פקודות טקסט ישירות
       if (message.text) {
         userText = message.text.trim();
 
@@ -405,6 +447,7 @@ export class ChatSessionDO {
           return;
         }
       } else if (message.voice) {
+        // ב. זיהוי קולי (STT)
         console.log("Voice note update received from Telegram!");
 
         const sttDisabled = await this.state.storage.get<boolean>("stt_disabled");
@@ -494,6 +537,7 @@ export class ChatSessionDO {
         throw new Error("TAVILY_API_KEY is missing in environment variables");
       }
 
+      // ג. היסטוריה מ-DO Storage
       console.log("5. Reading chat history from DO Storage...");
       let messages: any[] = (await this.state.storage.get<any[]>("history")) || [];
 
@@ -542,6 +586,7 @@ export class ChatSessionDO {
 
       const activeMessages = [...messages];
 
+      // ד. מנגנון 3 מודלים מדורג
       console.log("6. Calling LLM Pipeline Turn 1...");
       const aiResponse = await this.executeLLMPipeline(activeMessages, tools);
       console.log("AI First response output:", JSON.stringify(aiResponse));
@@ -667,6 +712,7 @@ export class ChatSessionDO {
       await this.state.storage.put("history", messages);
       console.log("11. Conversation history updated in DO storage.");
 
+      // ה. פלט קולי (TTS)
       const voiceDisabled = await this.state.storage.get<boolean>("voice_disabled");
       const ttsService = this.env.TTS_SERVICE;
 
@@ -705,6 +751,7 @@ export class ChatSessionDO {
         );
       }
 
+      // ו. שידור מדורג
       if (tempMsgId) {
         console.log("13. Streaming chunks to Telegram...");
         const chunks = this.chunkText(finalAnswer);
