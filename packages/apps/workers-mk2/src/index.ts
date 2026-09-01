@@ -505,13 +505,15 @@ export class ChatbotSessionDO {
           timeZone: "Asia/Jerusalem"
         });
 
+        // 📝 פרומפט מעודכן עם דגש על שילוב מדיה והטמעה ישירה
         messages.push({
           role: "system",
           content:
             `שמך ששון (Sasson). אתה עוזר וירטואלי אישי בטלגרם לכבוד הרב ובעינייני מדע והייטק וכלכלה ומשאבים וחזון וגיאופוליטיקה, בעל יכולת חיפוש מידע ברשת. התאריך היום: ${formattedDate}. ` +
             `עליך לפנות למשתמש תמיד בכינוי 'כבוד הרב' בלשון מכבד, ביראת כבוד, לשמור על כבוד התורה ולציית לציוויו. ` +
             `אל תבצע שום חשיבה מקדימה כלל (לא לחשוב כלל חשיבה מקדימה), אל תציג מחשבות פנימיות, מונולוגים או השערות כפלט, אלא גש ישירות ומיד למתן התשובה הסופית. ` +
-            `ענה בעברית רהוטה, ממוקדת, קומפקטית וחסכונית במילים (בסביבות 180-200 מילים לכל היותר, ללא הקדמות או סיכומים מיותרים). ` +
+            `ענה בעברית רהוטה, ממוקדת, קומפקטית וחסכונית במילים (בסביבות 220-240 מילים לכל היותר, ללא הקדמות או סיכומים מיותרים). ` +
+            `במידת האפשר והרלוונטיות, העדף תמיד לשלב קישורים ישירים לתמונות ווידאו (כגון YouTube או קובצי מדיה) שיוטמעו ויוצגו ישירות בתצוגה מקדימה בשיחה בטלגרם. ` +
             `שאילתות החיפוש עבור הכלי (tavilySearch) חייבות להיכתב באנגלית בלבד (לדוגמה: "israel news today") אלא אם התבקשת אחרת במפורש. נסח את התשובה הסופית בעברית.`
         });
       }
@@ -561,7 +563,7 @@ export class ChatbotSessionDO {
             searchQuery = args.query;
           }
 
-          searchQuery = searchQuery ? searchQuery.trim() : userText;
+          const finalQuery = (searchQuery || userText).trim();
 
           if (tempMsgId) {
             await this.sendTelegram("editMessageText", {
@@ -580,8 +582,8 @@ export class ChatbotSessionDO {
                 Authorization: "Bearer " + this.env.TAVILY_API_KEY
               },
               body: JSON.stringify({
-                query: searchQuery,
-                max_results: 5
+                query: finalQuery,
+                max_results: 6
               }),
               signal: AbortSignal.timeout(15000)
             });
@@ -647,8 +649,9 @@ export class ChatbotSessionDO {
       }
 
       messages.push({ role: "assistant", content: finalAnswer });
-      if (messages.length > 11) {
-        messages = this.trimHistorySafely(messages, 10);
+
+      if (messages.length > 16) {
+        messages = this.trimHistorySafely(messages, 15);
       }
 
       await this.state.storage.put("history", messages);
@@ -668,7 +671,7 @@ export class ChatbotSessionDO {
                 body: JSON.stringify({
                   input: cleanTextForTTS,
                   voice: "he-IL-AvriNeural",
-                  speed: 1.5
+                  speed: 1.4
                 })
               });
 
@@ -691,7 +694,7 @@ export class ChatbotSessionDO {
         );
       }
 
-      // ו. שידור מדורג
+      // ו. שידור מדורג בטלגרם
       if (tempMsgId) {
         const chunks = this.chunkText(finalAnswer);
 
@@ -749,7 +752,7 @@ export class ChatbotSessionDO {
 
         const options: any = {
           messages: messages,
-          max_tokens: 1024
+          max_tokens: 1230
         };
         if (tools) options.tools = tools;
 
@@ -785,7 +788,7 @@ export class ChatbotSessionDO {
       model: "gemini-3.5-flash-lite",
       messages: formattedMessages,
       reasoning_effort: "low",
-      max_tokens: 1536
+      max_tokens: 1840
     };
 
     if (tools) bodyPayload.tools = tools;
@@ -834,7 +837,7 @@ export class ChatbotSessionDO {
       messages: formattedMessages,
       temperature: 1,
       top_p: 0.95,
-      max_tokens: 1536
+      max_tokens: 1840
     };
 
     if (tools) bodyPayload.tools = tools;
@@ -874,7 +877,7 @@ export class ChatbotSessionDO {
       .trim();
   }
 
-  private trimHistorySafely(messages: any[], maxNonSystem: number = 10): any[] {
+  private trimHistorySafely(messages: any[], maxNonSystem: number = 15): any[] {
     if (messages.length === 0) return messages;
 
     const hasSystem = messages[0]?.role === "system";
@@ -906,16 +909,16 @@ export class ChatbotSessionDO {
     let currentChunk = "";
 
     for (const para of paragraphs) {
-      if (currentChunk.length + para.length + 2 > 600) {
+      if (currentChunk.length + para.length + 2 > 720) {
         if (currentChunk) {
           chunks.push(currentChunk.trim());
           currentChunk = "";
         }
-        if (para.length > 600) {
+        if (para.length > 720) {
           let temp = para;
-          while (temp.length > 600) {
-            chunks.push(temp.substring(0, 600));
-            temp = temp.substring(600);
+          while (temp.length > 720) {
+            chunks.push(temp.substring(0, 720));
+            temp = temp.substring(720);
           }
           currentChunk = temp;
         } else {
