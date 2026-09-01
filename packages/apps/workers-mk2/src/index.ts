@@ -218,6 +218,7 @@ export class ChatbotSessionDO {
 
     let tempMsgId: number | undefined = undefined;
     let chatId = "";
+    let stopTypingHeartbeat: (() => void) | null = null;
 
     try {
       const message = update.message;
@@ -230,6 +231,9 @@ export class ChatbotSessionDO {
       if (!this.env.TELEGRAM_BOT_TOKEN) {
         throw new Error("Missing TELEGRAM_BOT_TOKEN environment variable");
       }
+
+      // הפעלת פעימות אינדיקטור הקלדה רציף בטלגרם
+      stopTypingHeartbeat = this.startTypingHeartbeat(chatId);
 
       console.log("3. Sending initial 'thinking' message to Telegram...");
       const thinkingMsg = await this.sendTelegram("sendMessage", {
@@ -443,8 +447,6 @@ export class ChatbotSessionDO {
         const sttService = this.env.STT_SERVICE;
         if (!sttService) throw new Error("STT_SERVICE binding missing.");
 
-        await this.sendTelegram("sendChatAction", { chat_id: chatId, action: "record_voice" });
-
         if (tempMsgId) {
           await this.sendTelegram("editMessageText", {
             chat_id: chatId,
@@ -505,7 +507,6 @@ export class ChatbotSessionDO {
           timeZone: "Asia/Jerusalem"
         });
 
-        // 📝 פרומפט מעודכן עם דגש על שילוב מדיה והטמעה ישירה
         messages.push({
           role: "system",
           content:
@@ -541,112 +542,147 @@ export class ChatbotSessionDO {
       ];
 
       const activeMessages = [...messages];
-      const aiResponse = await this.executeLLMPipeline(activeMessages, tools);
-
+      
+      // =========================================================================
+      // 🔄 לולאת סוכן חכם (Agent Loop): עד 3 סבבי חיפוש עוקבים
+      // =========================================================================
+      const MAX_SEARCH_ROUNDS = 3;
+      let round = 0;
       let finalAnswer = "";
+      let currentProvider: LLMProvider = "gemini";
 
-      if (aiResponse.tool_calls && aiResponse.tool_calls.length > 0) {
-        const toolCall = aiResponse.tool_calls[0];
-        const functionName = toolCall.function?.name || toolCall.name;
+      while (round < MAX_SEARCH_ROUNDS) {
+        round++;
+        console.log(`Agent Loop Turn ${round}/${MAX_SEARCH_ROUNDS}...`);
 
-        if (functionName === "tavilySearch") {
-          const args = toolCall.function?.arguments || toolCall.arguments;
-          let searchQuery = "";
+        const aiResponse = await this.executeLLMPipeline(activeMessages, tools, currentProvider);
+        currentProvider = aiResponse.provider || currentProvider;
 
-          if (typeof args === "string") {
+        if (aiResponse.tool_calls && aiResponse.tool_calls.length > 0) {
+          const toolCall = aiResponse.tool_calls[0];
+          const functionName = toolCall.function?.name || toolCall.name;
+
+          if (functionName === "tavilySearch") {
+            const args = toolCall.function?.arguments || toolCall.arguments;
+            let searchQuery = "";
+
+            if (typeof args === "string") {
+              try {
+                searchQuery = JSON.parse(args).query;
+              } catch {
+                searchQuery = args;
+              }
+            } else if (args && args.query) {
+              searchQuery = args.query;
+            }
+
+            const finalQuery = (searchQuery || userText).trim();
+
+            if (tempMsgId) {
+              await this.sendTelegram("editMessageText", {
+                chat_id: chatId,
+                message_id: tempMsgId,
+                text: `🌐 מבצע חיפוש מעמיק ברשת (${round}/${MAX_SEARCH_ROUNDS}) עבור כבוד הרב...`
+              });
+            }
+
+            let searchResultsStr = "";
             try {
-              searchQuery = JSON.parse(args).query;
-            } catch {
-              searchQuery = args;
+              const tavilyRes = await fetch("https://api.tavily.com/search", {
+                method: "POST",
+                headers: {
+                  "Content-Type": "application/json",
+                  Authorization: "Bearer " + this.env.TAVILY_API_KEY
+                },
+                body: JSON.stringify({
+                  query: finalQuery,
+                  max_results: 6
+                }),
+                signal: AbortSignal.timeout(15000)
+              });
+
+              if (tavilyRes.ok) {
+                const tavilyData = (await tavilyRes.json()) as { results?: TavilyResult[] };
+                const results = tavilyData.results || [];
+                searchResultsStr = results
+                  .map((r: TavilyResult) => `Title: ${r.title}\nURL: ${r.url}\nContent: ${r.content}`)
+                  .join("\n\n");
+              } else {
+                throw new Error("Tavily returned " + tavilyRes.status);
+              }
+            } catch (err) {
+              searchResultsStr = "שגיאת חיפוש: החיפוש ברשת נכשל. אנא השב על בסיס הידע הקיים שלך.";
             }
-          } else if (args && args.query) {
-            searchQuery = args.query;
-          }
 
-          const finalQuery = (searchQuery || userText).trim();
+            const toolCallId = toolCall.id || `call_${Date.now()}_${round}`;
+            const argsString = typeof args === "string" ? args : JSON.stringify(args || {});
 
-          if (tempMsgId) {
-            await this.sendTelegram("editMessageText", {
-              chat_id: chatId,
-              message_id: tempMsgId,
-              text: "🌐 מבצע חיפוש ברשת עבור כבוד הרב..."
-            });
-          }
+            const formattedToolCalls: any[] = [
+              {
+                id: toolCallId,
+                type: "function",
+                function: {
+                  name: "tavilySearch",
+                  arguments: argsString
+                },
+                ...(toolCall.extra_content ? { extra_content: toolCall.extra_content } : {})
+              }
+            ];
 
-          let searchResultsStr = "";
-          try {
-            const tavilyRes = await fetch("https://api.tavily.com/search", {
-              method: "POST",
-              headers: {
-                "Content-Type": "application/json",
-                Authorization: "Bearer " + this.env.TAVILY_API_KEY
-              },
-              body: JSON.stringify({
-                query: finalQuery,
-                max_results: 6
-              }),
-              signal: AbortSignal.timeout(15000)
+            activeMessages.push({
+              role: "assistant",
+              content: aiResponse.response || "",
+              tool_calls: formattedToolCalls
             });
 
-            if (tavilyRes.ok) {
-              const tavilyData = (await tavilyRes.json()) as { results?: TavilyResult[] };
-              const results = tavilyData.results || [];
-              searchResultsStr = results
-                .map((r: TavilyResult) => "Title: " + r.title + "\nURL: " + r.url + "\nContent: " + r.content)
-                .join("\n\n");
-            } else {
-              throw new Error("Tavily returned " + tavilyRes.status);
-            }
-          } catch (err) {
-            searchResultsStr = "שגיאת חיפוש: החיפוש ברשת נכשל. אנא השב על בסיס הידע הקיים שלך.";
-          }
-
-          const toolCallId = toolCall.id || "call_" + Date.now();
-          const argsString = typeof args === "string" ? args : JSON.stringify(args || {});
-
-          const formattedToolCalls: any[] = [
-            {
-              id: toolCallId,
-              type: "function",
-              function: {
-                name: "tavilySearch",
-                arguments: argsString
-              },
-              ...(toolCall.extra_content ? { extra_content: toolCall.extra_content } : {})
-            }
-          ];
-
-          activeMessages.push({
-            role: "assistant",
-            content: aiResponse.response || "",
-            tool_calls: formattedToolCalls
-          });
-
-          activeMessages.push({
-            role: "tool",
-            tool_call_id: toolCallId,
-            name: "tavilySearch",
-            content: searchResultsStr
-          });
-
-          if (tempMsgId) {
-            await this.sendTelegram("editMessageText", {
-              chat_id: chatId,
-              message_id: tempMsgId,
-              text: "✍️ מנסח תשובה עבור כבוד הרב..."
+            activeMessages.push({
+              role: "tool",
+              tool_call_id: toolCallId,
+              name: "tavilySearch",
+              content: searchResultsStr
             });
-          }
 
-          const finalAiResponse = await this.executeLLMPipeline(
-            activeMessages,
-            tools,
-            aiResponse.provider || "gemini"
-          );
-          finalAnswer = finalAiResponse.response || "לא התקבלה תשובה סופית.";
+            // ממשיכים לסיבוב הבא בלולאה
+            continue;
+          } else {
+            finalAnswer = aiResponse.response?.trim() || "";
+            break;
+          }
+        } else {
+          // המודל החזיר תשובה טקסטואלית מוכנה ואינו זקוק לחיפוש נוסף
+          finalAnswer = aiResponse.response?.trim() || "";
+          break;
         }
-      } else {
-        finalAnswer = aiResponse.response || "לא הצלחתי לעבד את הפנייה.";
       }
+
+      // ניסוח תשובה סופית אם הסתיימו 3 סבבים
+      if (!finalAnswer) {
+        if (tempMsgId) {
+          await this.sendTelegram("editMessageText", {
+            chat_id: chatId,
+            message_id: tempMsgId,
+            text: "✍️ מנסח תשובה מקיפה עבור כבוד הרב..."
+          });
+        }
+
+        const finalAiResponse = await this.executeLLMPipeline(
+          activeMessages,
+          undefined, // ללא tools כדי לאלץ כתיבת טקסט סופי
+          currentProvider
+        );
+        finalAnswer = finalAiResponse.response?.trim() || "";
+
+        if (!finalAnswer) {
+          activeMessages.push({
+            role: "user",
+            content: "אנא נסח כעת את התשובה המלאה והסופית עבור כבוד הרב מתוך כל תוצאות החיפוש שנאספו לעיל."
+          });
+          const retryAi = await this.executeLLMPipeline(activeMessages, undefined, "gemini");
+          finalAnswer = retryAi.response?.trim() || "לא הצלחתי לעבד את תוצאות החיפוש. אנא נסה שוב.";
+        }
+      }
+
+      console.log("10. Final Answer calculated:", finalAnswer);
 
       messages.push({ role: "assistant", content: finalAnswer });
 
@@ -727,7 +763,32 @@ export class ChatbotSessionDO {
           console.error("Failed to notify user:", teleErr);
         }
       }
+    } finally {
+      if (stopTypingHeartbeat) {
+        stopTypingHeartbeat();
+      }
     }
+  }
+
+  // ============================================================================
+  // 4. עזר לשליחת אינדיקטור הקלדה רציף ברקע
+  // ============================================================================
+  private startTypingHeartbeat(chatId: string): () => void {
+    let isActive = true;
+    this.sendTelegram("sendChatAction", { chat_id: chatId, action: "typing" });
+
+    const intervalId = setInterval(() => {
+      if (!isActive) {
+        clearInterval(intervalId);
+        return;
+      }
+      this.sendTelegram("sendChatAction", { chat_id: chatId, action: "typing" });
+    }, 4500);
+
+    return () => {
+      isActive = false;
+      clearInterval(intervalId);
+    };
   }
 
   private async executeLLMPipeline(
@@ -743,11 +804,17 @@ export class ChatbotSessionDO {
     for (const provider of providersToTry) {
       try {
         if (provider === "gemini") {
-          return await this.callGeminiAPI(messages, tools);
+          const res = await this.callGeminiAPI(messages, tools);
+          if (res.response || (res.tool_calls && res.tool_calls.length > 0)) {
+            return res;
+          }
         }
 
         if (provider === "nvidia") {
-          return await this.callNvidiaAPI(messages, tools);
+          const res = await this.callNvidiaAPI(messages, tools);
+          if (res.response || (res.tool_calls && res.tool_calls.length > 0)) {
+            return res;
+          }
         }
 
         const options: any = {
@@ -811,8 +878,14 @@ export class ChatbotSessionDO {
     const resJson = (await response.json()) as any;
     const choice = resJson?.choices?.[0];
 
+    const content =
+      choice?.message?.content ||
+      choice?.message?.reasoning_content ||
+      choice?.text ||
+      "";
+
     return {
-      response: choice?.message?.content || "",
+      response: content,
       tool_calls: choice?.message?.tool_calls,
       provider: "gemini" as LLMProvider
     };
@@ -860,8 +933,14 @@ export class ChatbotSessionDO {
     const resJson = (await response.json()) as any;
     const choice = resJson?.choices?.[0];
 
+    const content =
+      choice?.message?.content ||
+      choice?.message?.reasoning_content ||
+      choice?.text ||
+      "";
+
     return {
-      response: choice?.message?.content || "",
+      response: content,
       tool_calls: choice?.message?.tool_calls,
       provider: "nvidia" as LLMProvider
     };
