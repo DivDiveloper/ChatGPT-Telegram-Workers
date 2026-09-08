@@ -47,6 +47,9 @@ export interface Env {
   ZMAN_SERVICE?: LocalFetcher;
   LNEWS_SERVICE?: LocalFetcher;
   MOVI_SERVICE?: LocalFetcher;
+
+  // שינוי 1: Service Binding ל-Sefaria
+  SEFARIA_SEARCH?: LocalFetcher;
 }
 
 export interface TelegramUpdate {
@@ -250,6 +253,23 @@ export class ChatbotSessionDO {
       // א. פקודות טקסט
       if (message.text) {
         userText = message.text.trim();
+
+        // שינוי 3: /sfr מטופל בקוד ולא בפרומפט
+        const forceSefaria = userText.startsWith("/sfr");
+        if (forceSefaria) {
+          userText = userText.slice(4).trim();
+
+          if (!userText) {
+            if (tempMsgId) {
+              await this.sendTelegram("editMessageText", {
+                chat_id: chatId,
+                message_id: tempMsgId,
+                text: "📖 נא לציין את השאלה או המקור לחיפוש בסיפריא."
+              });
+            }
+            return;
+          }
+        }
 
         if (userText === "/clear" || userText === "/reset" || userText === "מחק היסטוריה") {
           await this.state.storage.delete("history");
@@ -491,7 +511,6 @@ export class ChatbotSessionDO {
           return;
         }
       }
-
       if (!this.env.TAVILY_API_KEY) throw new Error("TAVILY_API_KEY is missing.");
 
       // ג. היסטוריה מ-DO Storage
@@ -521,6 +540,7 @@ export class ChatbotSessionDO {
 
       messages.push({ role: "user", content: userText });
 
+      // שינוי 2: כלי Sefaria נוסף לצד tavilySearch
       const tools = [
         {
           type: "function",
@@ -533,6 +553,25 @@ export class ChatbotSessionDO {
                 query: {
                   type: "string",
                   description: "The search query to search the web for"
+                }
+              },
+              required: ["query"]
+            }
+          }
+        },
+        {
+          type: "function",
+          function: {
+            name: "sefariaSearch",
+            description:
+              "Search and retrieve Jewish sources, verses, texts and references from the Sefaria Jewish library.",
+            parameters: {
+              type: "object",
+              properties: {
+                query: {
+                  type: "string",
+                  description:
+                    "Search query or Sefaria reference to locate Jewish texts and sources."
                 }
               },
               required: ["query"]
@@ -769,7 +808,6 @@ export class ChatbotSessionDO {
       }
     }
   }
-
   // ============================================================================
   // 4. עזר לשליחת אינדיקטור הקלדה רציף ברקע
   // ============================================================================
@@ -993,34 +1031,43 @@ export class ChatbotSessionDO {
           chunks.push(currentChunk.trim());
           currentChunk = "";
         }
+
         if (para.length > 720) {
           let temp = para;
+
           while (temp.length > 720) {
             chunks.push(temp.substring(0, 720));
             temp = temp.substring(720);
           }
+
           currentChunk = temp;
         } else {
           currentChunk = para;
         }
       } else {
-        currentChunk = currentChunk ? currentChunk + "\n\n" + para : para;
+        currentChunk = currentChunk
+          ? currentChunk + "\n\n" + para
+          : para;
       }
     }
+
     if (currentChunk) {
       chunks.push(currentChunk.trim());
     }
+
     return chunks;
   }
 
   private async sendTelegram(method: string, payload: any): Promise<any> {
     const url = `https://api.telegram.org/bot${this.env.TELEGRAM_BOT_TOKEN}/${method}`;
+
     const response = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
       signal: AbortSignal.timeout(15000)
     });
+
     return response.json();
   }
 
@@ -1032,34 +1079,46 @@ export class ChatbotSessionDO {
     const payloadMarkdown = {
       chat_id: chatId,
       message_id: messageId,
-      text: text,
+      text,
       parse_mode: "Markdown"
     };
 
-    const res = await this.sendTelegram("editMessageText", payloadMarkdown);
+    const res = await this.sendTelegram(
+      "editMessageText",
+      payloadMarkdown
+    );
+
     if (!res.ok) {
       await this.sendTelegram("editMessageText", {
         chat_id: chatId,
         message_id: messageId,
-        text: text
+        text
       });
     }
   }
 
-  private async sendNewTelegramWithMarkdownFallback(chatId: string, text: string): Promise<any> {
+  private async sendNewTelegramWithMarkdownFallback(
+    chatId: string,
+    text: string
+  ): Promise<any> {
     const payloadMarkdown = {
       chat_id: chatId,
-      text: text,
+      text,
       parse_mode: "Markdown"
     };
 
-    let res = await this.sendTelegram("sendMessage", payloadMarkdown);
+    let res = await this.sendTelegram(
+      "sendMessage",
+      payloadMarkdown
+    );
+
     if (!res.ok) {
       res = await this.sendTelegram("sendMessage", {
         chat_id: chatId,
-        text: text
+        text
       });
     }
+
     return res;
   }
 }
