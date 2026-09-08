@@ -49,6 +49,10 @@ binding = "ZMAN_SERVICE"
 service = "zman"
 
 [[services]]
+binding = "SEFARIA_SEARCH" 
+service = "sefaria-search"
+
+[[services]]
 binding = "LNEWS_SERVICE"
 service = "lnews"
 
