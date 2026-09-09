@@ -732,10 +732,7 @@ export class ChatbotSessionDO {
       await this.state.storage.put("history", messages);
 
       // ה. פלט קולי (TTS)
-      const voiceDisabled = await this.state.storage.get<boolean>("voice_disabled");
-      const ttsService = this.env.TTS_SERVICE;
-
-      if (ttsService && !voiceDisabled) {
+      const voiceDisabled = await this.state.storage.get<boolean>("voice_disabled"); const ttsService = this.env.TTS_SERVICE; if (ttsService && !voiceDisabled) { this.state.waitUntil( (async () => { try { const cleanTextForTTS = this.stripMarkdownAndEmojis(finalAnswer); const ttsUrl = "https://YOUR-TTS-WORKER.workers.dev/stream" + "?text=" + encodeURIComponent(cleanTextForTTS) + "&voice=" + encodeURIComponent("he-IL-AvriNeural") + "&speed=1.4"; const telegramRes = await fetch( `https://api.telegram.org/bot${this.env.TELEGRAM_BOT_TOKEN}/sendVoice`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ chat_id: chatId, voice: ttsUrl }), signal: AbortSignal.timeout(30000) } ); if (!telegramRes.ok) { const errorText = await telegramRes.text(); console.error( "Telegram sendVoice failed:", telegramRes.status, errorText ); } } catch (ttsErr) { console.error( "Failed TTS Direct URL:", ttsErr ); } })() ); } 
         this.state.waitUntil(
           (async () => {
             try {
