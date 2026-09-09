@@ -41,6 +41,7 @@ export interface Env {
   NVIDIA_API_KEY?: string;
   ALLOWED_USER_IDS?: string;
 
+  TTS_WORKER_URL?: string;
   TTS_SERVICE?: LocalFetcher;
   STT_SERVICE?: LocalFetcher;
   NEWS_SERVICE?: LocalFetcher;
@@ -356,6 +357,33 @@ export class ChatbotSessionDO {
         }
       );
     }
+  }
+
+  private getTTSBaseUrl(): string {
+    if (this.env.TTS_WORKER_URL) {
+      return this.env.TTS_WORKER_URL.startsWith("http")
+        ? this.env.TTS_WORKER_URL
+        : `https://${this.env.TTS_WORKER_URL}`;
+    }
+    return "https://ttss.d2023david.workers.dev";
+  }
+
+  private buildAudioWebAppMarkup(text: string): any {
+    const baseUrl = this.getTTSBaseUrl();
+    const cleanText = this.stripMarkdownAndEmojis(text);
+    const trimmed = cleanText.length > 1500 ? cleanText.slice(0, 1500) : cleanText;
+    const appUrl = `${baseUrl}/app?text=${encodeURIComponent(trimmed)}`;
+
+    return {
+      inline_keyboard: [
+        [
+          {
+            text: "🎵 לחץ להאזנה",
+            web_app: { url: appUrl }
+          }
+        ]
+      ]
+    };
   }
 
   private async processTelegramUpdate(
@@ -1395,22 +1423,7 @@ export class ChatbotSessionDO {
       );
 
       // ======================================================================
-      // ה. TTS STREAMING
-      //
-      // שינוי TTS בלבד:
-      //
-      // במקום:
-      //
-      // TTSS -> כל הקובץ -> audioBuffer -> Blob -> Telegram
-      //
-      // עכשיו:
-      //
-      // TTSS -> ReadableStream -> multipart ReadableStream -> Telegram
-      //
-      // אין audioChunks[]
-      // אין totalLength
-      // אין Blob
-      // אין המתנה ל-EOF לפני התחלת ה-upload.
+      // ה. TTS STREAMING (הזרמה ישירה לטלגרם כ-Voice Message)
       // ======================================================================
 
       const voiceDisabled =
@@ -1418,13 +1431,7 @@ export class ChatbotSessionDO {
           "voice_disabled"
         );
 
-      const ttsService =
-        this.env.TTS_SERVICE;
-
-      if (
-        ttsService &&
-        !voiceDisabled
-      ) {
+      if (!voiceDisabled) {
         this.state.waitUntil(
           this.streamTTSVoiceToTelegram(
             chatId,
@@ -1439,7 +1446,7 @@ export class ChatbotSessionDO {
       }
 
       // ======================================================================
-      // ו. שידור מדורג בטלגרם
+      // ו. שידור מדורג בטלגרם + כפתור נגן רזה (Mini App Bottom Sheet)
       // ======================================================================
 
       if (tempMsgId) {
@@ -1448,13 +1455,22 @@ export class ChatbotSessionDO {
             finalAnswer
           );
 
+        const webAppMarkup =
+          this.buildAudioWebAppMarkup(
+            finalAnswer
+          );
+
         if (
           chunks.length > 0
         ) {
+          const isSingle =
+            chunks.length === 1;
+
           await this.sendTelegramWithMarkdownFallback(
             chatId,
             tempMsgId,
-            chunks[0]
+            chunks[0],
+            isSingle ? webAppMarkup : undefined
           );
 
           for (
@@ -1479,9 +1495,13 @@ export class ChatbotSessionDO {
                 )
             );
 
+            const isLast =
+              i === chunks.length - 1;
+
             await this.sendNewTelegramWithMarkdownFallback(
               chatId,
-              chunks[i]
+              chunks[i],
+              isLast ? webAppMarkup : undefined
             );
           }
         }
@@ -1531,25 +1551,14 @@ export class ChatbotSessionDO {
 
   // ==========================================================================
   // TTS STREAMING
-  //
-  // הפונקציה היחידה החדשה שנוספה ל-DO לצורך הניסוי.
-  //
-  // היא מקבלת את ה-stream מה-TTSS ומזרימה אותו ישירות
-  // לתוך multipart/form-data של Telegram.
+  // מקבל את ה-Stream מה-TTSS ומזרים אותו ישירות לתוך multipart/form-data
+  // של Telegram sendVoice (Zero Latency)
   // ==========================================================================
 
   private async streamTTSVoiceToTelegram(
     chatId: string,
     text: string
   ): Promise<void> {
-    if (!this.env.TTS_SERVICE) {
-      console.log(
-        "[TTS STREAM] TTS_SERVICE is not configured."
-      );
-
-      return;
-    }
-
     const cleanText =
       this.stripMarkdownAndEmojis(
         text
@@ -1566,29 +1575,33 @@ export class ChatbotSessionDO {
       `[TTS STREAM] Starting TTS for chat ${chatId}`
     );
 
-    // ------------------------------------------------------------------------
-    // קריאה ל-TTSS.
-    //
-    // ה-TTSS שלך כבר מחזיר audio/mpeg כ-ReadableStream.
-    // ------------------------------------------------------------------------
-
-    const ttsUrl =
-      `http://ttss.local/stream` +
-      `?text=${encodeURIComponent(
+    const ttsPath =
+      `/stream?text=${encodeURIComponent(
         cleanText
-      )}` +
-      `&voice=${encodeURIComponent(
-        "he-IL-AvriNeural"
-      )}` +
-      `&speed=1.4`;
+      )}`;
 
-    const ttsResponse =
-      await this.env.TTS_SERVICE.fetch(
-        ttsUrl,
-        {
-          method: "GET"
-        }
-      );
+    let ttsResponse: Response;
+
+    if (this.env.TTS_SERVICE) {
+      ttsResponse =
+        await this.env.TTS_SERVICE.fetch(
+          `https://ttss.local${ttsPath}`,
+          {
+            method: "GET"
+          }
+        );
+    } else {
+      const baseUrl =
+        this.getTTSBaseUrl();
+
+      ttsResponse =
+        await fetch(
+          `${baseUrl}${ttsPath}`,
+          {
+            method: "GET"
+          }
+        );
+    }
 
     if (!ttsResponse.ok) {
       const errorText =
@@ -1606,7 +1619,7 @@ export class ChatbotSessionDO {
     }
 
     console.log(
-      `[TTS STREAM] TTSS headers received after ${
+      `[TTS STREAM] TTSS stream opened after ${
         Date.now() - startedAt
       }ms`
     );
@@ -1653,29 +1666,12 @@ export class ChatbotSessionDO {
     const ttsReader =
       ttsResponse.body.getReader();
 
-    let firstChunkAt:
-      | number
-      | null = null;
-
-    let totalBytes = 0;
-
-    let chunkCount = 0;
-
-    // ------------------------------------------------------------------------
-    // STREAMING MULTIPART
-    //
-    // חשוב:
-    // controller.enqueue(value) מעביר כל chunk הלאה.
-    // אנחנו לא שומרים אותו במערך.
-    // ------------------------------------------------------------------------
-
     const multipartStream =
       new ReadableStream<Uint8Array>({
         async start(
           controller
         ) {
           try {
-            // multipart header
             controller.enqueue(
               prefixBytes
             );
@@ -1698,56 +1694,13 @@ export class ChatbotSessionDO {
                 continue;
               }
 
-              if (
-                firstChunkAt ===
-                null
-              ) {
-                firstChunkAt =
-                  Date.now();
-
-                console.log(
-                  `[TTS STREAM] FIRST AUDIO CHUNK after ${
-                    firstChunkAt -
-                    startedAt
-                  }ms`
-                );
-              }
-
-              chunkCount++;
-
-              totalBytes +=
-                value.length;
-
               controller.enqueue(
                 value
               );
-
-              if (
-                chunkCount === 1 ||
-                chunkCount % 10 === 0
-              ) {
-                console.log(
-                  `[TTS STREAM] chunk=${chunkCount} bytes=${totalBytes}`
-                );
-              }
             }
 
-            // multipart closing boundary
             controller.enqueue(
               suffixBytes
-            );
-
-            console.log(
-              `[TTS STREAM] EOF after ${
-                Date.now() -
-                startedAt
-              }ms; chunks=${chunkCount}; bytes=${totalBytes}; firstChunk=${
-                firstChunkAt !==
-                null
-                  ? firstChunkAt -
-                    startedAt
-                  : "none"
-              }ms`
             );
 
             controller.close();
@@ -1772,11 +1725,6 @@ export class ChatbotSessionDO {
         async cancel(
           reason
         ) {
-          console.log(
-            "[TTS STREAM] Upload cancelled:",
-            reason
-          );
-
           try {
             await ttsReader.cancel(
               reason
@@ -1786,20 +1734,13 @@ export class ChatbotSessionDO {
       });
 
     // ------------------------------------------------------------------------
-    // Telegram
+    // Telegram sendVoice
     // ------------------------------------------------------------------------
 
     const telegramUrl =
       `https://api.telegram.org/bot` +
       `${this.env.TELEGRAM_BOT_TOKEN}` +
       `/sendVoice`;
-
-    console.log(
-      `[TTS STREAM] Opening Telegram upload after ${
-        Date.now() -
-        startedAt
-      }ms`
-    );
 
     const telegramResponse =
       await fetch(
@@ -1815,7 +1756,6 @@ export class ChatbotSessionDO {
               "no-cache"
           },
 
-          // כאן מתבצע ה-streaming האמיתי.
           body:
             multipartStream,
 
@@ -1828,15 +1768,6 @@ export class ChatbotSessionDO {
 
     const telegramText =
       await telegramResponse.text();
-
-    console.log(
-      `[TTS STREAM] Telegram completed after ${
-        Date.now() -
-        startedAt
-      }ms; status=${
-        telegramResponse.status
-      }; response=${telegramText}`
-    );
 
     if (
       !telegramResponse.ok
@@ -1869,7 +1800,9 @@ export class ChatbotSessionDO {
     }
 
     console.log(
-      `[TTS STREAM] SUCCESS chat=${chatId} bytes=${totalBytes} chunks=${chunkCount}`
+      `[TTS STREAM] SUCCESS chat=${chatId} in ${
+        Date.now() - startedAt
+      }ms`
     );
   }
 
@@ -2086,7 +2019,7 @@ export class ChatbotSessionDO {
 
     const bodyPayload: any = {
       model:
-        "gemini-3.5-flash-lite",
+        "gemini-2.5-flash-lite",
 
       messages:
         formattedMessages,
@@ -2523,9 +2456,10 @@ export class ChatbotSessionDO {
   private async sendTelegramWithMarkdownFallback(
     chatId: string,
     messageId: number,
-    text: string
+    text: string,
+    replyMarkup?: any
   ): Promise<void> {
-    const payloadMarkdown =
+    const payloadMarkdown: any =
       {
         chat_id:
           chatId,
@@ -2539,6 +2473,11 @@ export class ChatbotSessionDO {
           "Markdown"
       };
 
+    if (replyMarkup) {
+      payloadMarkdown.reply_markup =
+        replyMarkup;
+    }
+
     const res =
       await this.sendTelegram(
         "editMessageText",
@@ -2546,8 +2485,7 @@ export class ChatbotSessionDO {
       );
 
     if (!res.ok) {
-      await this.sendTelegram(
-        "editMessageText",
+      const payloadFallback: any =
         {
           chat_id:
             chatId,
@@ -2556,16 +2494,26 @@ export class ChatbotSessionDO {
             messageId,
 
           text
-        }
+        };
+
+      if (replyMarkup) {
+        payloadFallback.reply_markup =
+          replyMarkup;
+      }
+
+      await this.sendTelegram(
+        "editMessageText",
+        payloadFallback
       );
     }
   }
 
   private async sendNewTelegramWithMarkdownFallback(
     chatId: string,
-    text: string
+    text: string,
+    replyMarkup?: any
   ): Promise<any> {
-    const payloadMarkdown =
+    const payloadMarkdown: any =
       {
         chat_id:
           chatId,
@@ -2576,6 +2524,11 @@ export class ChatbotSessionDO {
           "Markdown"
       };
 
+    if (replyMarkup) {
+      payloadMarkdown.reply_markup =
+        replyMarkup;
+    }
+
     let res =
       await this.sendTelegram(
         "sendMessage",
@@ -2583,18 +2536,26 @@ export class ChatbotSessionDO {
       );
 
     if (!res.ok) {
+      const payloadFallback: any =
+        {
+          chat_id:
+            chatId,
+
+          text
+        };
+
+      if (replyMarkup) {
+        payloadFallback.reply_markup =
+          replyMarkup;
+      }
+
       res =
         await this.sendTelegram(
           "sendMessage",
-          {
-            chat_id:
-              chatId,
-
-            text
-          }
+          payloadFallback
         );
     }
 
     return res;
   }
-}
+    }
