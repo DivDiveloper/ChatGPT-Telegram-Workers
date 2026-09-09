@@ -124,6 +124,16 @@ const PROVIDER_ORDER: LLMProvider[] = [
   "workers-ai"
 ];
 
+// פונקציית עזר לקידוד טקסט בעברית לפורמט Base64URL בטוח לקישורי טלגרם
+function toBase64Url(str: string): string {
+  const bytes = new TextEncoder().encode(str);
+  let binary = "";
+  for (let i = 0; i < bytes.length; i++) {
+    binary += String.fromCharCode(bytes[i]);
+  }
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
 // ============================================================================
 // 2. ה-Worker הדק (Router)
 // ============================================================================
@@ -368,18 +378,20 @@ export class ChatbotSessionDO {
     return "https://ttss.d2023david.workers.dev";
   }
 
+  // בניית כפתור Mini App לפתיחה במצב חצי-מסך (Compact Bottom Sheet)
   private buildAudioWebAppMarkup(text: string): any {
-    const baseUrl = this.getTTSBaseUrl();
     const cleanText = this.stripMarkdownAndEmojis(text);
-    const trimmed = cleanText.length > 1500 ? cleanText.slice(0, 1500) : cleanText;
-    const appUrl = `${baseUrl}/app?text=${encodeURIComponent(trimmed)}`;
+    const trimmed = cleanText.length > 500 ? cleanText.slice(0, 500) : cleanText;
+    const encodedParam = toBase64Url(trimmed);
+
+    const directLink = `https://t.me/New_Boy_Bot_bot/Wave_Player?startapp=${encodedParam}&mode=compact`;
 
     return {
       inline_keyboard: [
         [
           {
             text: "🎵 לחץ להאזנה",
-            web_app: { url: appUrl }
+            url: directLink
           }
         ]
       ]
@@ -1423,7 +1435,7 @@ export class ChatbotSessionDO {
       );
 
       // ======================================================================
-      // ה. TTS STREAMING (הזרמה ישירה לטלגרם כ-Voice Message)
+      // ה. TTS STREAMING (שליחת Voice ישיר בטלגרם)
       // ======================================================================
 
       const voiceDisabled =
@@ -1446,7 +1458,7 @@ export class ChatbotSessionDO {
       }
 
       // ======================================================================
-      // ו. שידור מדורג בטלגרם + כפתור נגן רזה (Mini App Bottom Sheet)
+      // ו. שידור התשובה לצ'אט + כפתור Mini App לפתיחה ב-Compact Mode
       // ======================================================================
 
       if (tempMsgId) {
@@ -1551,8 +1563,6 @@ export class ChatbotSessionDO {
 
   // ==========================================================================
   // TTS STREAMING
-  // מקבל את ה-Stream מה-TTSS ומזרים אותו ישירות לתוך multipart/form-data
-  // של Telegram sendVoice (Zero Latency)
   // ==========================================================================
 
   private async streamTTSVoiceToTelegram(
@@ -1623,10 +1633,6 @@ export class ChatbotSessionDO {
         Date.now() - startedAt
       }ms`
     );
-
-    // ------------------------------------------------------------------------
-    // multipart/form-data boundary
-    // ------------------------------------------------------------------------
 
     const boundary =
       `----SassonTTS${crypto
@@ -1732,10 +1738,6 @@ export class ChatbotSessionDO {
           } catch {}
         }
       });
-
-    // ------------------------------------------------------------------------
-    // Telegram sendVoice
-    // ------------------------------------------------------------------------
 
     const telegramUrl =
       `https://api.telegram.org/bot` +
@@ -2558,4 +2560,4 @@ export class ChatbotSessionDO {
 
     return res;
   }
-    }
+}
