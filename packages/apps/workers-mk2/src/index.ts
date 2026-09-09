@@ -48,51 +48,40 @@ export interface Env {
   ZMAN_SERVICE?: LocalFetcher;
   LNEWS_SERVICE?: LocalFetcher;
   MOVI_SERVICE?: LocalFetcher;
-
   SEFARIA_SEARCH?: LocalFetcher;
 }
 
 export interface TelegramUpdate {
   update_id: number;
-
   message?: {
     message_id: number;
-
     from?: {
       id: number;
       is_bot: boolean;
       first_name: string;
       username?: string;
     };
-
     chat: {
       id: number;
       type: string;
     };
-
     date: number;
     text?: string;
-
     voice?: {
       file_id: string;
     };
   };
-
   callback_query?: {
     id: string;
-
     from: {
       id: number;
     };
-
     message?: {
       chat: {
         id: number;
       };
-
       message_id: number;
     };
-
     data?: string;
   };
 }
@@ -105,35 +94,21 @@ export interface TavilyResult {
 
 export interface TelegramGetFileResult {
   ok: boolean;
-
   result?: {
     file_path?: string;
   };
-
   description?: string;
 }
 
-export type LLMProvider =
-  "gemini" |
-  "nvidia" |
-  "workers-ai";
-
-const PROVIDER_ORDER: LLMProvider[] = [
-  "gemini",
-  "nvidia",
-  "workers-ai"
-];
+export type LLMProvider = "gemini" | "nvidia" | "workers-ai";
+const PROVIDER_ORDER: LLMProvider[] = ["gemini", "nvidia", "workers-ai"];
 
 // ============================================================================
 // 2. ה-Worker הדק (Router)
 // ============================================================================
 
 export default {
-  async fetch(
-    request: Request,
-    env: Env,
-    ctx: LocalExecutionContext
-  ): Promise<Response> {
+  async fetch(request: Request, env: Env, ctx: LocalExecutionContext): Promise<Response> {
     if (request.method !== "POST") {
       return new Response("Method Not Allowed", { status: 405 });
     }
@@ -152,11 +127,7 @@ export default {
       return new Response("Invalid JSON", { status: 200 });
     }
 
-    const chatId =
-      update.message?.chat?.id ??
-      update.callback_query?.message?.chat?.id ??
-      update.callback_query?.from?.id;
-
+    const chatId = update.message?.chat?.id ?? update.callback_query?.message?.chat?.id ?? update.callback_query?.from?.id;
     if (!chatId) {
       return new Response(JSON.stringify({ ok: true, skipped: "no_chat_id" }), {
         status: 200,
@@ -167,7 +138,6 @@ export default {
     if (env.ALLOWED_USER_IDS) {
       const senderId = update.message?.from?.id ?? update.callback_query?.from?.id;
       const allowedList = env.ALLOWED_USER_IDS.split(",").map((id) => id.trim());
-
       if (senderId && !allowedList.includes(String(senderId))) {
         return new Response(JSON.stringify({ ok: true, skipped: "unauthorized_user" }), {
           status: 200,
@@ -564,6 +534,7 @@ export class ChatbotSessionDO {
             `עליך לפנות למשתמש תמיד בכינוי 'כבוד הרב' בלשון מכבד, ביראת כבוד, לשמור על כבוד התורה ולציית לציוויו. ` +
             `אל תבצע שום חשיבה מקדימה כלל, אל תציג מחשבות פנימיות, מונולוגים או השערות כפלט, אלא גש ישירות ומיד למתן התשובה הסופית. ` +
             `ענה בעברית רהוטה, ממוקדת, קומפקטית וחסכונית במילים (בסביבות 220-240 מילים לכל היותר). ` +
+            `במידת האפשר והרלוונטיות, העדף תמיד לשלב קישורים ישירים לתמונות ווידאו שיוטמעו ויוצגו ישירות בתצוגה מקדימה בטלגרם. ` +
             `שאילתות החיפוש עבור הכלי (tavilySearch) חייבות להיכתב באנגלית בלבד. נסח את התשובה הסופית בעברית.`
         });
       }
@@ -757,13 +728,13 @@ export class ChatbotSessionDO {
   }
 
   // ==========================================================================
-  // צינור ההזרמה הישיר ל-Telegram sendAudio (Multipart Stream ללא Buffering)
+  // צינור ההזרמה הישיר ל-Telegram sendAudio
   // ==========================================================================
   private async streamAudioToTelegram(chatId: string, text: string): Promise<void> {
-    const cleanText = this.stripMarkdownAndEmojis(text);
+    const cleanText = this.stripTextAndUrlsForTTS(text);
     if (!cleanText.trim()) return;
 
-    const ttsPath = `/stream?text=${encodeURIComponent(cleanText)}&voice=he-IL-HilaNeural`;
+    const ttsPath = `/stream?text=${encodeURIComponent(cleanText)}`;
     let ttsResponse: Response;
 
     if (this.env.TTS_SERVICE) {
@@ -933,7 +904,7 @@ export class ChatbotSessionDO {
 
     const nvidiaUrl = "https://integrate.api.nvidia.com/v1/chat/completions";
     const bodyPayload: any = {
-      model: "nvidia/nemotron-3-super-120b-a12b",
+      model: "deepseek-ai/deepseek-v4-pro-0813",
       messages: messages.map((m) => ({
         role: m.role,
         content: m.content,
@@ -941,9 +912,9 @@ export class ChatbotSessionDO {
         ...(m.tool_call_id && { tool_call_id: m.tool_call_id }),
         ...(m.name && { name: m.name })
       })),
-      temperature: 1,
+      temperature: 0.8,
       top_p: 0.95,
-      max_tokens: 1840
+      max_tokens: 2048
     };
 
     if (tools) bodyPayload.tools = tools;
@@ -971,6 +942,18 @@ export class ChatbotSessionDO {
 
   private stripMarkdownAndEmojis(text: string): string {
     return text
+      .replace(/[*_`#~[\]()]/g, "")
+      .replace(/[\u{1F300}-\u{1F9FF}\u{2700}-\u{27BF}\u{2600}-\u{26FF}]/gu, "")
+      .replace(/[\r\n]+/g, " ")
+      .trim();
+  }
+
+  private stripTextAndUrlsForTTS(text: string): string {
+    return text
+      .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
+      .replace(/https?:\/\/\S+/gi, "")
+      .replace(/www\.\S+/gi, "")
+      .replace(/t\.me\/\S+/gi, "")
       .replace(/[*_`#~[\]()]/g, "")
       .replace(/[\u{1F300}-\u{1F9FF}\u{2700}-\u{27BF}\u{2600}-\u{26FF}]/gu, "")
       .replace(/[\r\n]+/g, " ")
