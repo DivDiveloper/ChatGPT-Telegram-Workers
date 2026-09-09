@@ -752,10 +752,44 @@ export class ChatbotSessionDO {
 
               if (!ttsRes.ok) return;
 
-              const audioBuffer = await ttsRes.arrayBuffer();
-              const formData = new FormData();
-              formData.append("chat_id", chatId);
-              formData.append("voice", new Blob([audioBuffer], { type: "audio/mpeg" }), "voice.mp3");
+              const reader = ttsRes.body?.getReader();
+
+if (!reader) {
+  throw new Error("TTS Worker returned no readable stream.");
+}
+
+const audioChunks: Uint8Array[] = [];
+let totalLength = 0;
+
+while (true) {
+  const { done, value } = await reader.read();
+
+  if (done) break;
+
+  if (value && value.length > 0) {
+    audioChunks.push(value);
+    totalLength += value.length;
+  }
+}
+
+const audioBuffer = new Uint8Array(totalLength);
+let offset = 0;
+
+for (const chunk of audioChunks) {
+  audioBuffer.set(chunk, offset);
+  offset += chunk.length;
+}
+
+const formData = new FormData();
+
+formData.append("chat_id", chatId);
+
+formData.append(
+  "voice",
+  new Blob([audioBuffer], { type: "audio/mpeg" }),
+  "voice.mp3"
+);
+
 
               await fetch(`https://api.telegram.org/bot${this.env.TELEGRAM_BOT_TOKEN}/sendVoice`, {
                 method: "POST",
