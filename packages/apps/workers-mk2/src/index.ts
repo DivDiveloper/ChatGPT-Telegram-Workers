@@ -511,276 +511,648 @@ export class ChatbotSessionDO {
           return;
         }
       }
-  const activeMessages = [...messages];
-  
-  // =========================================================================
-  // 🔄 לולאת סוכן חכם (Agent Loop): עד 3 סבבי חיפוש עוקבים
-  // =========================================================================
-  const MAX_SEARCH_ROUNDS = 3;
-  let round = 0;
-  let finalAnswer = "";
-  let currentProvider: LLMProvider = "gemini";
+      if (!this.env.TAVILY_API_KEY) throw new Error("TAVILY_API_KEY is missing.");
 
-  while (round < MAX_SEARCH_ROUNDS) {
-    round++;
-    console.log(`Agent Loop Turn ${round}/${MAX_SEARCH_ROUNDS}...`);
+      // ג. היסטוריה מ-DO Storage
+      let messages: any[] = (await this.state.storage.get<any[]>("history")) || [];
 
-    const aiResponse = await this.executeLLMPipeline(activeMessages, tools, currentProvider);
-    currentProvider = aiResponse.provider || currentProvider;
+      if (messages.length === 0) {
+        const today = new Date();
+        const formattedDate = today.toLocaleDateString("he-IL", {
+          year: "numeric",
+          month: "long",
+          day: "numeric",
+          weekday: "long",
+          timeZone: "Asia/Jerusalem"
+        });
 
-    if (aiResponse.tool_calls && aiResponse.tool_calls.length > 0) {
-      const toolCall = aiResponse.tool_calls[0];
-      const functionName = toolCall.function?.name || toolCall.name;
+        messages.push({
+          role: "system",
+          content:
+            `שמך ששון (Sasson). אתה עוזר וירטואלי אישי בטלגרם לכבוד הרב ובעינייני מדע והייטק וכלכלה ומשאבים וחזון וגיאופוליטיקה, בעל יכולת חיפוש מידע ברשת. התאריך היום: ${formattedDate}. ` +
+            `עליך לפנות למשתמש תמיד בכינוי 'כבוד הרב' בלשון מכבד, ביראת כבוד, לשמור על כבוד התורה ולציית לציוויו. ` +
+            `אל תבצע שום חשיבה מקדימה כלל (לא לחשוב כלל חשיבה מקדימה), אל תציג מחשבות פנימיות, מונולוגים או השערות כפלט, אלא גש ישירות ומיד למתן התשובה הסופית. ` +
+            `ענה בעברית רהוטה, ממוקדת, קומפקטית וחסכונית במילים (בסביבות 220-240 מילים לכל היותר, ללא הקדמות או סיכומים מיותרים). ` +
+            `במידת האפשר והרלוונטיות, העדף תמיד לשלב קישורים ישירים לתמונות ווידאו (כגון YouTube או קובצי מדיה) שיוטמעו ויוצגו ישירות בתצוגה מקדימה בשיחה בטלגרם. ` +
+            `שאילתות החיפוש עבור הכלי (tavilySearch) חייבות להיכתב באנגלית בלבד (לדוגמה: "israel news today") אלא אם התבקשת אחרת במפורש. נסח את התשובה הסופית בעברית.`
+        });
+      }
 
-      if (functionName === "tavilySearch") {
-        const args = toolCall.function?.arguments || toolCall.arguments;
-        let searchQuery = "";
+      messages.push({ role: "user", content: userText });
 
-        if (typeof args === "string") {
-          try {
-            searchQuery = JSON.parse(args).query;
-          } catch {
-            searchQuery = args;
+      // שינוי 2: כלי Sefaria נוסף לצד tavilySearch
+      const tools = [
+        {
+          type: "function",
+          function: {
+            name: "tavilySearch",
+            description: "Search the web for up-to-date and real-time information on any topic.",
+            parameters: {
+              type: "object",
+              properties: {
+                query: {
+                  type: "string",
+                  description: "The search query to search the web for"
+                }
+              },
+              required: ["query"]
+            }
           }
-        } else if (args && args.query) {
-          searchQuery = args.query;
+        },
+        {
+          type: "function",
+          function: {
+            name: "sefariaSearch",
+            description:
+              "Search and retrieve Jewish sources, verses, texts and references from the Sefaria Jewish library.",
+            parameters: {
+              type: "object",
+              properties: {
+                query: {
+                  type: "string",
+                  description:
+                    "Search query or Sefaria reference to locate Jewish texts and sources."
+                }
+              },
+              required: ["query"]
+            }
+          }
         }
+      ];
 
-        const finalQuery = (searchQuery || userText).trim();
+      const activeMessages = [...messages];
+      
+      // =========================================================================
+      // 🔄 לולאת סוכן חכם (Agent Loop): עד 3 סבבי חיפוש עוקבים
+      // =========================================================================
+      const MAX_SEARCH_ROUNDS = 3;
+      let round = 0;
+      let finalAnswer = "";
+      let currentProvider: LLMProvider = "gemini";
 
+      while (round < MAX_SEARCH_ROUNDS) {
+        round++;
+        console.log(`Agent Loop Turn ${round}/${MAX_SEARCH_ROUNDS}...`);
+
+        const aiResponse = await this.executeLLMPipeline(activeMessages, tools, currentProvider);
+        currentProvider = aiResponse.provider || currentProvider;
+
+        if (aiResponse.tool_calls && aiResponse.tool_calls.length > 0) {
+          const toolCall = aiResponse.tool_calls[0];
+          const functionName = toolCall.function?.name || toolCall.name;
+
+          if (functionName === "tavilySearch") {
+            const args = toolCall.function?.arguments || toolCall.arguments;
+            let searchQuery = "";
+
+            if (typeof args === "string") {
+              try {
+                searchQuery = JSON.parse(args).query;
+              } catch {
+                searchQuery = args;
+              }
+            } else if (args && args.query) {
+              searchQuery = args.query;
+            }
+
+            const finalQuery = (searchQuery || userText).trim();
+
+            if (tempMsgId) {
+              await this.sendTelegram("editMessageText", {
+                chat_id: chatId,
+                message_id: tempMsgId,
+                text: `🌐 מבצע חיפוש מעמיק ברשת (${round}/${MAX_SEARCH_ROUNDS}) עבור כבוד הרב...`
+              });
+            }
+
+            let searchResultsStr = "";
+            try {
+              const tavilyRes = await fetch("https://api.tavily.com/search", {
+                method: "POST",
+                headers: {
+                  "Content-Type": "application/json",
+                  Authorization: "Bearer " + this.env.TAVILY_API_KEY
+                },
+                body: JSON.stringify({
+                  query: finalQuery,
+                  max_results: 6
+                }),
+                signal: AbortSignal.timeout(15000)
+              });
+
+              if (tavilyRes.ok) {
+                const tavilyData = (await tavilyRes.json()) as { results?: TavilyResult[] };
+                const results = tavilyData.results || [];
+                searchResultsStr = results
+                  .map((r: TavilyResult) => `Title: ${r.title}\nURL: ${r.url}\nContent: ${r.content}`)
+                  .join("\n\n");
+              } else {
+                throw new Error("Tavily returned " + tavilyRes.status);
+              }
+            } catch (err) {
+              searchResultsStr = "שגיאת חיפוש: החיפוש ברשת נכשל. אנא השב על בסיס הידע הקיים שלך.";
+            }
+
+            const toolCallId = toolCall.id || `call_${Date.now()}_${round}`;
+            const argsString = typeof args === "string" ? args : JSON.stringify(args || {});
+
+            const formattedToolCalls: any[] = [
+              {
+                id: toolCallId,
+                type: "function",
+                function: {
+                  name: "tavilySearch",
+                  arguments: argsString
+                },
+                ...(toolCall.extra_content ? { extra_content: toolCall.extra_content } : {})
+              }
+            ];
+
+            activeMessages.push({
+              role: "assistant",
+              content: aiResponse.response || "",
+              tool_calls: formattedToolCalls
+            });
+
+            activeMessages.push({
+              role: "tool",
+              tool_call_id: toolCallId,
+              name: "tavilySearch",
+              content: searchResultsStr
+            });
+
+            // ממשיכים לסיבוב הבא בלולאה
+            continue;
+          } else {
+            finalAnswer = aiResponse.response?.trim() || "";
+            break;
+          }
+        } else {
+          // המודל החזיר תשובה טקסטואלית מוכנה ואינו זקוק לחיפוש נוסף
+          finalAnswer = aiResponse.response?.trim() || "";
+          break;
+        }
+      }
+
+      // ניסוח תשובה סופית אם הסתיימו 3 סבבים
+      if (!finalAnswer) {
         if (tempMsgId) {
           await this.sendTelegram("editMessageText", {
             chat_id: chatId,
             message_id: tempMsgId,
-            text: `🌐 מבצע חיפוש מעמיק ברשת (${round}/${MAX_SEARCH_ROUNDS}) עבור כבוד הרב...`
+            text: "✍️ מנסח תשובה מקיפה עבור כבוד הרב..."
           });
         }
 
-        let searchResultsStr = "";
+        const finalAiResponse = await this.executeLLMPipeline(
+          activeMessages,
+          undefined, // ללא tools כדי לאלץ כתיבת טקסט סופי
+          currentProvider
+        );
+        finalAnswer = finalAiResponse.response?.trim() || "";
+
+        if (!finalAnswer) {
+          activeMessages.push({
+            role: "user",
+            content: "אנא נסח כעת את התשובה המלאה והסופית עבור כבוד הרב מתוך כל תוצאות החיפוש שנאספו לעיל."
+          });
+          const retryAi = await this.executeLLMPipeline(activeMessages, undefined, "gemini");
+          finalAnswer = retryAi.response?.trim() || "לא הצלחתי לעבד את תוצאות החיפוש. אנא נסה שוב.";
+        }
+      }
+
+      console.log("10. Final Answer calculated:", finalAnswer);
+
+      messages.push({ role: "assistant", content: finalAnswer });
+
+      if (messages.length > 16) {
+        messages = this.trimHistorySafely(messages, 15);
+      }
+
+      await this.state.storage.put("history", messages);
+
+      // ה. פלט קולי (TTS)
+      const voiceDisabled = await this.state.storage.get<boolean>("voice_disabled");
+      const ttsService = this.env.TTS_SERVICE;
+
+      if (ttsService && !voiceDisabled) {
+        this.state.waitUntil(
+          (async () => {
+            try {
+              const cleanTextForTTS = this.stripMarkdownAndEmojis(finalAnswer);
+              const ttsRes = await ttsService.fetch("http://ttss.local/v1/audio/speech", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  input: cleanTextForTTS,
+                  voice: "he-IL-AvriNeural",
+                  speed: 1.4
+                })
+              });
+
+              if (!ttsRes.ok) return;
+
+              const reader = ttsRes.body?.getReader();
+
+if (!reader) {
+  throw new Error("TTS Worker returned no readable stream.");
+}
+
+const audioChunks: Uint8Array[] = [];
+let totalLength = 0;
+
+while (true) {
+  const { done, value } = await reader.read();
+
+  if (done) break;
+
+  if (value && value.length > 0) {
+    audioChunks.push(value);
+    totalLength += value.length;
+  }
+}
+
+const audioBuffer = new Uint8Array(totalLength);
+let offset = 0;
+
+for (const chunk of audioChunks) {
+  audioBuffer.set(chunk, offset);
+  offset += chunk.length;
+}
+
+const formData = new FormData();
+
+formData.append("chat_id", chatId);
+
+formData.append(
+  "voice",
+  new Blob([audioBuffer], { type: "audio/mpeg" }),
+  "voice.mp3"
+);
+
+
+              await fetch(`https://api.telegram.org/bot${this.env.TELEGRAM_BOT_TOKEN}/sendVoice`, {
+                method: "POST",
+                body: formData,
+                signal: AbortSignal.timeout(20000)
+              });
+            } catch (ttsErr) {
+              console.error("Failed TTS Worker:", ttsErr);
+            }
+          })()
+        );
+      }
+
+      // ו. שידור מדורג בטלגרם
+      if (tempMsgId) {
+        const chunks = this.chunkText(finalAnswer);
+
+        if (chunks.length > 0) {
+          await this.sendTelegramWithMarkdownFallback(chatId, tempMsgId, chunks[0]);
+
+          for (let i = 1; i < chunks.length; i++) {
+            await this.sendTelegram("sendChatAction", {
+              chat_id: chatId,
+              action: "typing"
+            });
+
+            await new Promise((resolve) => setTimeout(resolve, 800));
+            await this.sendNewTelegramWithMarkdownFallback(chatId, chunks[i]);
+          }
+        }
+      }
+    } catch (err) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      console.error("CRITICAL DO Error: " + errMsg);
+
+      if (tempMsgId && chatId) {
         try {
-          const tavilyRes = await fetch("https://api.tavily.com/search", {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              Authorization: "Bearer " + this.env.TAVILY_API_KEY
-            },
-            body: JSON.stringify({
-              query: finalQuery,
-              max_results: 6
-            }),
-            signal: AbortSignal.timeout(15000)
+          await this.sendTelegram("editMessageText", {
+            chat_id: chatId,
+            message_id: tempMsgId,
+            text: "⚠️ אירעה שגיאה במהלך עיבוד השיחה: " + errMsg
           });
+        } catch (teleErr) {
+          console.error("Failed to notify user:", teleErr);
+        }
+      }
+    } finally {
+      if (stopTypingHeartbeat) {
+        stopTypingHeartbeat();
+      }
+    }
+  }
+  // ============================================================================
+  // 4. עזר לשליחת אינדיקטור הקלדה רציף ברקע
+  // ============================================================================
+  private startTypingHeartbeat(chatId: string): () => void {
+    let isActive = true;
+    this.sendTelegram("sendChatAction", { chat_id: chatId, action: "typing" });
 
-          if (tavilyRes.ok) {
-            const tavilyData = (await tavilyRes.json()) as { results?: TavilyResult[] };
-            const results = tavilyData.results || [];
-            searchResultsStr = results
-              .map((r: TavilyResult) => `Title: ${r.title}\nURL: ${r.url}\nContent: ${r.content}`)
-              .join("\n\n");
-          } else {
-            throw new Error("Tavily returned " + tavilyRes.status);
+    const intervalId = setInterval(() => {
+      if (!isActive) {
+        clearInterval(intervalId);
+        return;
+      }
+      this.sendTelegram("sendChatAction", { chat_id: chatId, action: "typing" });
+    }, 4500);
+
+    return () => {
+      isActive = false;
+      clearInterval(intervalId);
+    };
+  }
+
+  private async executeLLMPipeline(
+    messages: any[],
+    tools?: any[],
+    startProvider: LLMProvider = "gemini"
+  ): Promise<any> {
+    const startIndex = PROVIDER_ORDER.indexOf(startProvider);
+    const providersToTry = startIndex >= 0 ? PROVIDER_ORDER.slice(startIndex) : PROVIDER_ORDER;
+
+    let lastErr: any = null;
+
+    for (const provider of providersToTry) {
+      try {
+        if (provider === "gemini") {
+          const res = await this.callGeminiAPI(messages, tools);
+          if (res.response || (res.tool_calls && res.tool_calls.length > 0)) {
+            return res;
           }
-        } catch (err) {
-          searchResultsStr = "שגיאת חיפוש: החיפוש ברשת נכשל. אנא השב על בסיס הידע הקיים שלך.";
         }
 
-        const toolCallId = toolCall.id || `call_${Date.now()}_${round}`;
-        const argsString = typeof args === "string" ? args : JSON.stringify(args || {});
-
-        const formattedToolCalls: any[] = [
-          {
-            id: toolCallId,
-            type: "function",
-            function: {
-              name: "tavilySearch",
-              arguments: argsString
-            },
-            ...(toolCall.extra_content ? { extra_content: toolCall.extra_content } : {})
+        if (provider === "nvidia") {
+          const res = await this.callNvidiaAPI(messages, tools);
+          if (res.response || (res.tool_calls && res.tool_calls.length > 0)) {
+            return res;
           }
-        ];
+        }
 
-        activeMessages.push({
-          role: "assistant",
-          content: aiResponse.response || "",
-          tool_calls: formattedToolCalls
-        });
+        const options: any = {
+          messages: messages,
+          max_tokens: 1230
+        };
+        if (tools) options.tools = tools;
 
-        activeMessages.push({
-          role: "tool",
-          tool_call_id: toolCallId,
-          name: "tavilySearch",
-          content: searchResultsStr
-        });
+        const cfRes = await this.env.AI.run("@cf/meta/llama-3.3-70b-instruct-fp8-fast", options);
+        return {
+          response: cfRes.response || "",
+          tool_calls: cfRes.tool_calls,
+          provider: "workers-ai" as LLMProvider
+        };
+      } catch (err) {
+        lastErr = err;
+      }
+    }
 
-        // ממשיכים לסיבוב הבא בלולאה
-        continue;
+    throw lastErr instanceof Error ? lastErr : new Error("All LLM providers failed.");
+  }
+
+  private async callGeminiAPI(messages: any[], tools?: any[]): Promise<any> {
+    if (!this.env.GEMINI_API_KEY) {
+      throw new Error("GEMINI_API_KEY is missing.");
+    }
+
+    const url = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions";
+    const formattedMessages = messages.map((m) => {
+      const msg: any = { role: m.role, content: m.content };
+      if (m.tool_calls) msg.tool_calls = m.tool_calls;
+      if (m.tool_call_id) msg.tool_call_id = m.tool_call_id;
+      if (m.name) msg.name = m.name;
+      return msg;
+    });
+
+    const bodyPayload: any = {
+      model: "gemini-3.5-flash-lite",
+      messages: formattedMessages,
+      reasoning_effort: "low",
+      max_tokens: 1840
+    };
+
+    if (tools) bodyPayload.tools = tools;
+
+    const response = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: "Bearer " + this.env.GEMINI_API_KEY
+      },
+      body: JSON.stringify(bodyPayload),
+      signal: AbortSignal.timeout(15000)
+    });
+
+    if (!response.ok) {
+      const errText = await response.text();
+      throw new Error("Google Gemini API returned status " + response.status + ". Details: " + errText);
+    }
+
+    const resJson = (await response.json()) as any;
+    const choice = resJson?.choices?.[0];
+
+    const content =
+      choice?.message?.content ||
+      choice?.message?.reasoning_content ||
+      choice?.text ||
+      "";
+
+    return {
+      response: content,
+      tool_calls: choice?.message?.tool_calls,
+      provider: "gemini" as LLMProvider
+    };
+  }
+
+  private async callNvidiaAPI(messages: any[], tools?: any[]): Promise<any> {
+    if (!this.env.NVIDIA_API_KEY) {
+      throw new Error("NVIDIA_API_KEY is missing.");
+    }
+
+    const nvidiaUrl = "https://integrate.api.nvidia.com/v1/chat/completions";
+    const formattedMessages = messages.map((m) => {
+      const msg: any = { role: m.role, content: m.content };
+      if (m.tool_calls) msg.tool_calls = m.tool_calls;
+      if (m.tool_call_id) msg.tool_call_id = m.tool_call_id;
+      if (m.name) msg.name = m.name;
+      return msg;
+    });
+
+    const bodyPayload: any = {
+      model: "nvidia/nemotron-3-super-120b-a12b",
+      messages: formattedMessages,
+      temperature: 1,
+      top_p: 0.95,
+      max_tokens: 1840
+    };
+
+    if (tools) bodyPayload.tools = tools;
+
+    const response = await fetch(nvidiaUrl, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: "Bearer " + this.env.NVIDIA_API_KEY
+      },
+      body: JSON.stringify(bodyPayload),
+      signal: AbortSignal.timeout(20000)
+    });
+
+    if (!response.ok) {
+      const errText = await response.text();
+      throw new Error("NVIDIA API returned status " + response.status + ". Details: " + errText);
+    }
+
+    const resJson = (await response.json()) as any;
+    const choice = resJson?.choices?.[0];
+
+    const content =
+      choice?.message?.content ||
+      choice?.message?.reasoning_content ||
+      choice?.text ||
+      "";
+
+    return {
+      response: content,
+      tool_calls: choice?.message?.tool_calls,
+      provider: "nvidia" as LLMProvider
+    };
+  }
+
+  private stripMarkdownAndEmojis(text: string): string {
+    return text
+      .replace(/[*_`#~[\]()]/g, "")
+      .replace(/[\u{1F300}-\u{1F9FF}]/gu, "")
+      .replace(/[\u{2700}-\u{27BF}]/gu, "")
+      .replace(/[\u{2600}-\u{26FF}]/gu, "")
+      .replace(/[\r\n]+/g, " ")
+      .trim();
+  }
+
+  private trimHistorySafely(messages: any[], maxNonSystem: number = 15): any[] {
+    if (messages.length === 0) return messages;
+
+    const hasSystem = messages[0]?.role === "system";
+    const systemMsg = hasSystem ? messages[0] : null;
+    const rest = hasSystem ? messages.slice(1) : messages;
+
+    let trimmed = rest.slice(-maxNonSystem);
+
+    while (trimmed.length > 0 && trimmed[0]?.role === "tool") {
+      trimmed = trimmed.slice(1);
+    }
+
+    while (
+      trimmed.length > 0 &&
+      trimmed[0]?.role === "assistant" &&
+      Array.isArray(trimmed[0]?.tool_calls) &&
+      trimmed[0].tool_calls.length > 0 &&
+      trimmed[1]?.role !== "tool"
+    ) {
+      trimmed = trimmed.slice(1);
+    }
+
+    return systemMsg ? [systemMsg, ...trimmed] : trimmed;
+  }
+
+  private chunkText(text: string): string[] {
+    const paragraphs = text.split(/\n\n+/).filter((p) => p.trim().length > 0);
+    const chunks: string[] = [];
+    let currentChunk = "";
+
+    for (const para of paragraphs) {
+      if (currentChunk.length + para.length + 2 > 720) {
+        if (currentChunk) {
+          chunks.push(currentChunk.trim());
+          currentChunk = "";
+        }
+
+        if (para.length > 720) {
+          let temp = para;
+
+          while (temp.length > 720) {
+            chunks.push(temp.substring(0, 720));
+            temp = temp.substring(720);
+          }
+
+          currentChunk = temp;
+        } else {
+          currentChunk = para;
+        }
       } else {
-        finalAnswer = aiResponse.response?.trim() || "";
-        break;
-      }
-    } else {
-      // המודל החזיר תשובה טקסטואלית מוכנה ואינו זקוק לחיפוש נוסף
-      finalAnswer = aiResponse.response?.trim() || "";
-      break;
-    }
-  }
-
-  // ניסוח תשובה סופית אם הסתיימו 3 סבבים
-  if (!finalAnswer) {
-    if (tempMsgId) {
-      await this.sendTelegram("editMessageText", {
-        chat_id: chatId,
-        message_id: tempMsgId,
-        text: "✍️ מנסח תשובה מקיפה עבור כבוד הרב..."
-      });
-    }
-
-    const finalAiResponse = await this.executeLLMPipeline(
-      activeMessages,
-      undefined, // ללא tools כדי לאלץ כתיבת טקסט סופי
-      currentProvider
-    );
-    finalAnswer = finalAiResponse.response?.trim() || "";
-
-    if (!finalAnswer) {
-      activeMessages.push({
-        role: "user",
-        content: "אנא נסח כעת את התשובה המלאה והסופית עבור כבוד הרב מתוך כל תוצאות החיפוש שנאספו לעיל."
-      });
-      const retryAi = await this.executeLLMPipeline(activeMessages, undefined, "gemini");
-      finalAnswer = retryAi.response?.trim() || "לא הצלחתי לעבד את תוצאות החיפוש. אנא נסה שוב.";
-    }
-  }
-
-  console.log("10. Final Answer calculated:", finalAnswer);
-
-  messages.push({ role: "assistant", content: finalAnswer });
-
-  if (messages.length > 16) {
-    messages = this.trimHistorySafely(messages, 15);
-  }
-
-  await this.state.storage.put("history", messages);
-
-  // ה. פלט קולי (TTS)
-  const voiceDisabled = await this.state.storage.get<boolean>("voice_disabled");
-  const ttsService = this.env.TTS_SERVICE;
-
-  if (ttsService && !voiceDisabled) {
-    this.state.waitUntil(
-      (async () => {
-        try {
-          const cleanTextForTTS = this.stripMarkdownAndEmojis(finalAnswer);
-
-          const ttsRes = await ttsService.fetch("http://ttss.local/v1/audio/speech", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              input: cleanTextForTTS,
-              voice: "he-IL-AvriNeural",
-              speed: 1.4
-            })
-          });
-
-          if (!ttsRes.ok) {
-            const errorText = await ttsRes.text();
-            console.error("TTSS returned error:", ttsRes.status, errorText);
-            return;
-          }
-
-          const reader = ttsRes.body?.getReader();
-
-          if (!reader) {
-            throw new Error("TTS Worker returned no readable stream.");
-          }
-
-          const audioChunks: Uint8Array[] = [];
-          let totalLength = 0;
-
-          while (true) {
-            const { done, value } = await reader.read();
-
-            if (done) break;
-
-            if (value && value.length > 0) {
-              audioChunks.push(value);
-              totalLength += value.length;
-            }
-          }
-
-          const audioBuffer = new Uint8Array(totalLength);
-          let offset = 0;
-
-          for (const chunk of audioChunks) {
-            audioBuffer.set(chunk, offset);
-            offset += chunk.length;
-          }
-
-          const formData = new FormData();
-
-          formData.append("chat_id", chatId);
-
-          formData.append(
-            "voice",
-            new Blob([audioBuffer], { type: "audio/mpeg" }),
-            "voice.mp3"
-          );
-
-          const telegramRes = await fetch(
-            `https://api.telegram.org/bot${this.env.TELEGRAM_BOT_TOKEN}/sendVoice`,
-            {
-              method: "POST",
-              body: formData,
-              signal: AbortSignal.timeout(20000)
-            }
-          );
-
-          if (!telegramRes.ok) {
-            const errorText = await telegramRes.text();
-            console.error("Telegram sendVoice failed:", telegramRes.status, errorText);
-          }
-        } catch (ttsErr) {
-          console.error("Failed TTS Worker:", ttsErr);
-        }
-      })()
-    );
-  }
-
-  // ו. שידור מדורג בטלגרם
-  if (tempMsgId) {
-    const chunks = this.chunkText(finalAnswer);
-
-    if (chunks.length > 0) {
-      await this.sendTelegramWithMarkdownFallback(chatId, tempMsgId, chunks[0]);
-
-      for (let i = 1; i < chunks.length; i++) {
-        await this.sendTelegram("sendChatAction", {
-          chat_id: chatId,
-          action: "typing"
-        });
-
-        await new Promise((resolve) => setTimeout(resolve, 800));
-        await this.sendNewTelegramWithMarkdownFallback(chatId, chunks[i]);
+        currentChunk = currentChunk
+          ? currentChunk + "\n\n" + para
+          : para;
       }
     }
-  }
-} catch (err) {
-  const errMsg = err instanceof Error ? err.message : String(err);
-  console.error("CRITICAL DO Error: " + errMsg);
 
-  if (tempMsgId && chatId) {
-    try {
+    if (currentChunk) {
+      chunks.push(currentChunk.trim());
+    }
+
+    return chunks;
+  }
+
+  private async sendTelegram(method: string, payload: any): Promise<any> {
+    const url = `https://api.telegram.org/bot${this.env.TELEGRAM_BOT_TOKEN}/${method}`;
+
+    const response = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(15000)
+    });
+
+    return response.json();
+  }
+
+  private async sendTelegramWithMarkdownFallback(
+    chatId: string,
+    messageId: number,
+    text: string
+  ): Promise<void> {
+    const payloadMarkdown = {
+      chat_id: chatId,
+      message_id: messageId,
+      text,
+      parse_mode: "Markdown"
+    };
+
+    const res = await this.sendTelegram(
+      "editMessageText",
+      payloadMarkdown
+    );
+
+    if (!res.ok) {
       await this.sendTelegram("editMessageText", {
         chat_id: chatId,
-        message_id: tempMsgId,
-        text: "⚠️ אירעה שגיאה במהלך עיבוד השיחה: " + errMsg
+        message_id: messageId,
+        text
       });
-    } catch (teleErr) {
-      console.error("Failed to notify user:", teleErr);
     }
   }
-} finally {
-  if (stopTypingHeartbeat) {
-    stopTypingHeartbeat();
+
+  private async sendNewTelegramWithMarkdownFallback(
+    chatId: string,
+    text: string
+  ): Promise<any> {
+    const payloadMarkdown = {
+      chat_id: chatId,
+      text,
+      parse_mode: "Markdown"
+    };
+
+    let res = await this.sendTelegram(
+      "sendMessage",
+      payloadMarkdown
+    );
+
+    if (!res.ok) {
+      res = await this.sendTelegram("sendMessage", {
+        chat_id: chatId,
+        text
+      });
+    }
+
+    return res;
   }
 }
