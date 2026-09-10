@@ -904,7 +904,7 @@ export class ChatbotSessionDO {
 
     const nvidiaUrl = "https://integrate.api.nvidia.com/v1/chat/completions";
     const bodyPayload: any = {
-      model: "deepseek-ai/deepseek-v4-pro-0813",
+      model: "nvidia/nemotron-3-ultra-550b-a55b",
       messages: messages.map((m) => ({
         role: m.role,
         content: m.content,
