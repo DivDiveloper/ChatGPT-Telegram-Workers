@@ -844,12 +844,12 @@ export class ChatbotSessionDO {
           if (res.response || (res.tool_calls && res.tool_calls.length > 0)) return res;
         }
 
-        console.log("🔄 מנסה לפנות ל-Cloudflare Workers AI (8B)...");
+        console.log("🔄 מנסה לפנות ל-Cloudflare Workers AI (70B FP8)...");
         const options: any = { messages, max_tokens: 1230 };
         if (tools) options.tools = tools;
 
         try {
-          const cfRes = await this.env.AI.run("@cf/meta/llama-3.1-8b-instruct", options);
+          const cfRes = await this.env.AI.run("@cf/meta/llama-3.3-70b-instruct-fp8-fast", options);
           return {
             response: cfRes.response || "",
             tool_calls: cfRes.tool_calls,
@@ -939,7 +939,7 @@ export class ChatbotSessionDO {
         Authorization: "Bearer " + this.env.NVIDIA_API_KEY
       },
       body: JSON.stringify(bodyPayload),
-      signal: AbortSignal.timeout(35000)
+      signal: AbortSignal.timeout(55000)
     });
 
     if (!response.ok) {
