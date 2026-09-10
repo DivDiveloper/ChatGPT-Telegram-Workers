@@ -833,25 +833,34 @@ export class ChatbotSessionDO {
     for (const provider of providersToTry) {
       try {
         if (provider === "gemini" && this.env.GEMINI_API_KEY) {
+          console.log("🔄 מנסה לפנות ל-Google Gemini...");
           const res = await this.callGeminiAPI(messages, tools);
           if (res.response || (res.tool_calls && res.tool_calls.length > 0)) return res;
         }
 
         if (provider === "nvidia" && this.env.NVIDIA_API_KEY) {
+          console.log("🔄 מנסה לפנות ל-NVIDIA NIM...");
           const res = await this.callNvidiaAPI(messages, tools);
           if (res.response || (res.tool_calls && res.tool_calls.length > 0)) return res;
         }
 
+        console.log("🔄 מנסה לפנות ל-Cloudflare Workers AI (8B)...");
         const options: any = { messages, max_tokens: 1230 };
         if (tools) options.tools = tools;
-        const cfRes = await this.env.AI.run("@cf/meta/llama-3.3-70b-instruct-fp8-fast", options);
 
-        return {
-          response: cfRes.response || "",
-          tool_calls: cfRes.tool_calls,
-          provider: "workers-ai" as LLMProvider
-        };
-      } catch (err) {
+        try {
+          const cfRes = await this.env.AI.run("@cf/meta/llama-3.1-8b-instruct", options);
+          return {
+            response: cfRes.response || "",
+            tool_calls: cfRes.tool_calls,
+            provider: "workers-ai" as LLMProvider
+          };
+        } catch (cfErr: any) {
+          console.error("❌ [Workers AI Quota/Error]:", cfErr?.message || cfErr);
+          throw cfErr;
+        }
+      } catch (err: any) {
+        console.error(`❌ [שגיאה בספק ${provider}]:`, err?.message || err);
         lastErr = err;
       }
     }
@@ -860,7 +869,7 @@ export class ChatbotSessionDO {
   }
 
   private async callGeminiAPI(messages: any[], tools?: any[]): Promise<any> {
-    if (!this.env.GEMINI_API_KEY) throw new Error("GEMINI_API_KEY is missing.");
+    if (!this.env.GEMINI_API_KEY) throw new Error("GEMINI_API_KEY is missing in Worker variables.");
 
     const url = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions";
     const bodyPayload: any = {
@@ -888,7 +897,11 @@ export class ChatbotSessionDO {
       signal: AbortSignal.timeout(15000)
     });
 
-    if (!response.ok) throw new Error("Google Gemini API returned status " + response.status);
+    if (!response.ok) {
+      const errText = await response.text();
+      throw new Error(`Google Gemini API Error ${response.status}: ${errText}`);
+    }
+
     const resJson = (await response.json()) as any;
     const choice = resJson?.choices?.[0];
 
@@ -900,7 +913,7 @@ export class ChatbotSessionDO {
   }
 
   private async callNvidiaAPI(messages: any[], tools?: any[]): Promise<any> {
-    if (!this.env.NVIDIA_API_KEY) throw new Error("NVIDIA_API_KEY is missing.");
+    if (!this.env.NVIDIA_API_KEY) throw new Error("NVIDIA_API_KEY is missing in Worker variables.");
 
     const nvidiaUrl = "https://integrate.api.nvidia.com/v1/chat/completions";
     const bodyPayload: any = {
@@ -926,10 +939,14 @@ export class ChatbotSessionDO {
         Authorization: "Bearer " + this.env.NVIDIA_API_KEY
       },
       body: JSON.stringify(bodyPayload),
-      signal: AbortSignal.timeout(20000)
+      signal: AbortSignal.timeout(35000)
     });
 
-    if (!response.ok) throw new Error("NVIDIA API returned status " + response.status);
+    if (!response.ok) {
+      const errText = await response.text();
+      throw new Error(`NVIDIA API Error ${response.status}: ${errText}`);
+    }
+
     const resJson = (await response.json()) as any;
     const choice = resJson?.choices?.[0];
 
